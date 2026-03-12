@@ -63,8 +63,9 @@ function buildTree(files: CodeFile[]) {
   return root;
 }
 
-export default function Editor({ initialFiles, snippetId, isReadOnly: initialReadOnly = false }: EditorProps) {
+export default function Editor({ initialFiles, snippetId: initialSnippetId, isReadOnly: initialReadOnly = false }: EditorProps) {
   const router = useRouter();
+  const [currentSnippetId, setCurrentSnippetId] = useState(initialSnippetId);
   const [isReadOnly, setIsReadOnly] = useState(initialReadOnly);
   const [files, setFiles] = useState<CodeFile[]>(
     initialFiles || [{ id: Date.now().toString(), name: 'main.txt', content: '' }]
@@ -197,8 +198,8 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
     if (isReadOnly || (isSaving && !isAuto)) return;
     if (!isAuto) setIsSaving(true);
     try {
-      if (snippetId) {
-        const response = await fetch(`/api/snippets/${snippetId}`, {
+      if (currentSnippetId) {
+        const response = await fetch(`/api/snippets/${currentSnippetId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ files })
@@ -215,8 +216,9 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
         });
         const data = await response.json();
         if (response.ok && data.id) {
+          setCurrentSnippetId(data.id);
+          window.history.replaceState(null, '', `/${data.id}`);
           if (!isAuto) showToast('Snippet saved');
-          router.push(`/${data.id}`);
         } else {
           if (!isAuto) showToast('Failed to save snippet');
         }
@@ -235,7 +237,7 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
       isFirstRender.current = false;
       return;
     }
-    if (isReadOnly || !snippetId) return;
+    if (isReadOnly || !currentSnippetId) return;
     const timer = setTimeout(() => {
       handleSave(true);
     }, 1000);
@@ -257,9 +259,9 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
   };
 
   const handleDeleteSnippet = async () => {
-    if (!snippetId) return;
+    if (!currentSnippetId) return;
     try {
-      const response = await fetch(`/api/snippets/${snippetId}`, { method: 'DELETE' });
+      const response = await fetch(`/api/snippets/${currentSnippetId}`, { method: 'DELETE' });
       if (response.ok) {
         showToast('Snippet deleted');
         setTimeout(() => router.push('/'), 1000);
@@ -464,7 +466,7 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
           </div>
 
           <div className="header-actions">
-            {snippetId && (
+            {currentSnippetId && (
               <button className="btn btn-outline" onClick={handleCopyLink}>
                 <Link2 size={14} />
                 Share
@@ -476,7 +478,7 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
               Copy
             </button>
 
-            {snippetId && (
+            {currentSnippetId && (
               <button
                 className={`btn ${isReadOnly ? 'btn-outline' : 'btn-outline'}`}
                 onClick={() => setIsReadOnly(!isReadOnly)}
@@ -494,7 +496,7 @@ export default function Editor({ initialFiles, snippetId, isReadOnly: initialRea
               </button>
             )}
 
-            {snippetId && (
+            {currentSnippetId && (
               <button className="btn btn-danger" onClick={handleDeleteSnippet}>
                 <Trash2 size={14} />
                 Delete
