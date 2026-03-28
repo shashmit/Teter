@@ -5,7 +5,7 @@ import Editor, { CodeFile } from '@/components/Editor';
 
 interface SnippetData {
     shortId: string;
-    filesJson: string;
+    files: CodeFile[];
     title?: string;
 }
 
@@ -15,12 +15,15 @@ async function getSnippet(id: string): Promise<{ files: CodeFile[]; title?: stri
         if (!convexUrl) return null;
 
         const convex = new ConvexHttpClient(convexUrl);
-        const snippet = await convex.query("snippets:getByShortId" as any, { shortId: id }) as SnippetData | null;
+        const convexQueries = convex as unknown as {
+            query: (name: string, args: unknown) => Promise<unknown>;
+        };
+        const snippet = await convexQueries.query("snippets:getByShortId", { shortId: id }) as SnippetData | null;
 
         if (!snippet) return null;
 
         return {
-            files: JSON.parse(snippet.filesJson) as CodeFile[],
+            files: snippet.files,
             title: snippet.title,
         };
     } catch (err) {

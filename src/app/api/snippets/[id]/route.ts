@@ -1,6 +1,19 @@
 import { NextResponse } from 'next/server';
 import { ConvexHttpClient } from "convex/browser";
 
+interface CodeFilePayload {
+    id: string;
+    name: string;
+    content: string;
+}
+
+interface SnippetResponse {
+    shortId: string;
+    title?: string;
+    files: CodeFilePayload[];
+    _creationTime: number;
+}
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ id: string }> }
@@ -11,9 +24,12 @@ export async function GET(
             return NextResponse.json({ error: 'Convex URL not configured' }, { status: 500 });
         }
         const convex = new ConvexHttpClient(convexUrl);
+        const convexClient = convex as unknown as {
+            query: (name: string, args: unknown) => Promise<unknown>;
+        };
         const { id } = await params;
 
-        const snippet: any = await convex.query("snippets:getByShortId" as any, { shortId: id });
+        const snippet = await convexClient.query("snippets:getByShortId", { shortId: id }) as SnippetResponse | null;
 
         if (!snippet) {
             return NextResponse.json({ error: 'Snippet not found' }, { status: 404 });
@@ -22,7 +38,7 @@ export async function GET(
         return NextResponse.json({
             id: snippet.shortId,
             title: snippet.title,
-            files: JSON.parse(snippet.filesJson),
+            files: snippet.files,
             createdAt: snippet._creationTime,
         });
     } catch (error) {
@@ -41,9 +57,12 @@ export async function DELETE(
             return NextResponse.json({ error: 'Convex URL not configured' }, { status: 500 });
         }
         const convex = new ConvexHttpClient(convexUrl);
+        const convexClient = convex as unknown as {
+            mutation: (name: string, args: unknown) => Promise<unknown>;
+        };
         const { id } = await params;
 
-        const success: boolean = await convex.mutation("snippets:removeByShortId" as any, { shortId: id });
+        const success = await convexClient.mutation("snippets:removeByShortId", { shortId: id }) as boolean;
 
         if (!success) {
             return NextResponse.json({ error: 'Snippet not found' }, { status: 404 });
@@ -66,16 +85,18 @@ export async function PATCH(
             return NextResponse.json({ error: 'Convex URL not configured' }, { status: 500 });
         }
         const convex = new ConvexHttpClient(convexUrl);
+        const convexClient = convex as unknown as {
+            mutation: (name: string, args: unknown) => Promise<unknown>;
+        };
         const { id } = await params;
         const body = await request.json();
-        const { title, files } = body;
+        const { title, files } = body as { title?: string; files?: CodeFilePayload[] };
 
         if (!files || !Array.isArray(files) || files.length === 0) {
             return NextResponse.json({ error: 'Files are required' }, { status: 400 });
         }
 
-        const filesJson = JSON.stringify(files);
-        const success = await convex.mutation("snippets:update" as any, { shortId: id, filesJson, title: title || undefined });
+        const success = await convexClient.mutation("snippets:update", { shortId: id, files, title: title || undefined }) as boolean;
 
         if (!success) {
             return NextResponse.json({ error: 'Snippet not found' }, { status: 404 });

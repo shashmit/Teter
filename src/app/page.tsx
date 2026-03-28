@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import Editor from '@/components/Editor';
+import Landing from '@/components/Landing';
 
 export const metadata: Metadata = {
   title: 'Create & Share Code Snippets',
@@ -12,8 +12,8 @@ export const metadata: Metadata = {
 
 export default function Home() {
   return (
-    <main className="animate-fade-in">
-      <Editor />
+    <main className="landing-container animate-fade-in">
+      <Landing />
     </main>
   );
 }

@@ -4,6 +4,15 @@ All notable changes to Teter are documented here.
 
 ---
 
+## [1.1.0] - 2026-03-29
+
+### Added
+- Custom landing page at the root URL (/) for unique user site routing
+- Creating or joining custom named User sites (up to 64 characters) with backend validation and collision prevention
+- Persistent file tabs: closing a tab now preserves the file without automatic deletion, requiring explicit delete actions
+
+---
+
 ## [1.0.0] - 2026-03-12
 
 ### Added

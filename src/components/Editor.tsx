@@ -6,7 +6,6 @@ import {
   FileText,
   FolderOpen,
   FolderClosed,
-  Plus,
   FolderPlus,
   FilePlus,
   X,
@@ -18,6 +17,7 @@ import {
   Code2,
   Pencil,
   Eye,
+  Upload,
 } from 'lucide-react';
 
 export interface CodeFile {
@@ -71,9 +71,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     initialFiles || [{ id: Date.now().toString(), name: 'main.txt', content: '' }]
   );
   const [activeFileId, setActiveFileId] = useState<string>(files[0]?.id || '');
+  const [openTabIds, setOpenTabIds] = useState<string[]>(files.map(f => f.id));
   const [isSaving, setIsSaving] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']));
+  const [pendingUploadPath, setPendingUploadPath] = useState('');
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const activeFile = files.find(f => f.id === activeFileId);
   const tree = useMemo(() => buildTree(files), [files]);
@@ -87,11 +90,106 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     e.preventDefault();
   };
 
+  const expandPath = (path: string, target: Set<string>) => {
+    if (!path) return;
+    path.split('/').reduce((acc, part) => {
+      const nextPath = acc ? `${acc}/${part}` : part;
+      target.add(nextPath);
+      return nextPath;
+    }, '');
+  };
+
+  const getUniquePath = (desiredPath: string, existingPaths: Set<string>) => {
+    if (!existingPaths.has(desiredPath)) {
+      existingPaths.add(desiredPath);
+      return desiredPath;
+    }
+    const pathParts = desiredPath.split('/');
+    const fileName = pathParts.pop() || desiredPath;
+    const parentPath = pathParts.join('/');
+    const extensionIndex = fileName.lastIndexOf('.');
+    const baseName = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+    const extension = extensionIndex > 0 ? fileName.slice(extensionIndex) : '';
+    let counter = 1;
+    let candidate = desiredPath;
+    while (existingPaths.has(candidate)) {
+      const candidateName = `${baseName} (${counter})${extension}`;
+      candidate = parentPath ? `${parentPath}/${candidateName}` : candidateName;
+      counter += 1;
+    }
+    existingPaths.add(candidate);
+    return candidate;
+  };
+
+  const uploadFilesAtPath = async (uploadList: FileList | File[], targetPath: string) => {
+    if (isReadOnly) return;
+    const selectedFiles = Array.from(uploadList);
+    if (!selectedFiles.length) return;
+    const existingPaths = new Set(files.map(file => file.name));
+    const nextExpanded = new Set(expandedFolders);
+    expandPath(targetPath, nextExpanded);
+    try {
+      const uploadedFiles: CodeFile[] = await Promise.all(
+        selectedFiles.map(async (file, index) => {
+          const rawRelativePath =
+            'webkitRelativePath' in file && (file as File & { webkitRelativePath?: string }).webkitRelativePath
+              ? (file as File & { webkitRelativePath?: string }).webkitRelativePath!
+              : file.name;
+          const sanitizedRelativePath = rawRelativePath
+            .replace(/^\/+/, '')
+            .split('/')
+            .filter(Boolean)
+            .join('/');
+          const desiredPath = targetPath
+            ? `${targetPath}/${sanitizedRelativePath}`
+            : sanitizedRelativePath;
+          const uniquePath = getUniquePath(desiredPath, existingPaths);
+          const parent = uniquePath.split('/').slice(0, -1).join('/');
+          expandPath(parent, nextExpanded);
+          return {
+            id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+            name: uniquePath,
+            content: await file.text(),
+          };
+        })
+      );
+      setFiles(prev => [...prev, ...uploadedFiles]);
+      setExpandedFolders(nextExpanded);
+      setOpenTabIds(prev => [...prev, ...uploadedFiles.map(f => f.id)]);
+      setActiveFileId(uploadedFiles[0].id);
+      showToast(
+        uploadedFiles.length === 1
+          ? `Uploaded ${uploadedFiles[0].name.split('/').pop()}`
+          : `Uploaded ${uploadedFiles.length} files`
+      );
+    } catch (err) {
+      console.error('Upload error:', err);
+      showToast('Failed to upload files');
+    }
+  };
+
+  const handleUploadButtonClick = (targetPath: string = '') => {
+    if (isReadOnly) return;
+    setPendingUploadPath(targetPath);
+    fileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files;
+    if (!selected || !selected.length) return;
+    await uploadFilesAtPath(selected, pendingUploadPath);
+    e.target.value = '';
+  };
+
   const handleDrop = (e: React.DragEvent, targetPath: string) => {
     e.preventDefault();
     e.stopPropagation();
     if (isReadOnly) return;
     try {
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        void uploadFilesAtPath(e.dataTransfer.files, targetPath);
+        return;
+      }
       const dataStr = e.dataTransfer.getData('text/plain');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
@@ -144,6 +242,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
     newExpanded.add(fullPath);
     setExpandedFolders(newExpanded);
+    setOpenTabIds(prev => [...prev, newFile.id]);
     setActiveFileId(newFile.id);
   };
 
@@ -167,12 +266,22 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       }, '');
     }
     setExpandedFolders(newExpanded);
+    setOpenTabIds(prev => [...prev, newFile.id]);
     setActiveFileId(newFile.id);
   };
 
   const handleFileNameChange = (e: React.ChangeEvent<HTMLInputElement>, id: string) => {
     if (isReadOnly) return;
     setFiles(files.map(f => f.id === id ? { ...f, name: e.target.value } : f));
+  };
+
+  const handleCloseTab = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const newTabs = openTabIds.filter(t => t !== id);
+    setOpenTabIds(newTabs);
+    if (activeFileId === id) {
+      setActiveFileId(newTabs[newTabs.length - 1] || '');
+    }
   };
 
   const handleDeleteFile = (e: React.MouseEvent, id: string) => {
@@ -184,8 +293,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
     const newFiles = files.filter(f => f.id !== id);
     setFiles(newFiles);
+
+    const newTabs = openTabIds.filter(t => t !== id);
+    setOpenTabIds(newTabs);
+
     if (activeFileId === id) {
-      setActiveFileId(newFiles[0].id);
+      setActiveFileId(newTabs[newTabs.length - 1] || '');
     }
   };
 
@@ -205,8 +318,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           body: JSON.stringify({ files })
         });
         if (!isAuto) {
-          if (response.ok) showToast('Snippet updated');
-          else showToast('Failed to update snippet');
+          if (response.ok) {
+            showToast('Snippet updated');
+            setIsReadOnly(true);
+          } else {
+            showToast('Failed to update snippet');
+          }
         }
       } else {
         const response = await fetch('/api/snippets', {
@@ -218,7 +335,10 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         if (response.ok && data.id) {
           setCurrentSnippetId(data.id);
           window.history.replaceState(null, '', `/${data.id}`);
-          if (!isAuto) showToast('Snippet saved');
+          if (!isAuto) {
+            showToast('Snippet saved');
+            setIsReadOnly(true);
+          }
         } else {
           if (!isAuto) showToast('Failed to save snippet');
         }
@@ -331,6 +451,14 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                     >
                       <FolderPlus size={13} />
                     </button>
+                    <button
+                      className="btn btn-ghost-danger"
+                      onClick={(e) => { e.stopPropagation(); handleUploadButtonClick(child.path); }}
+                      title="Upload files here"
+                      style={{ color: 'var(--text-muted)' }}
+                    >
+                      <Upload size={13} />
+                    </button>
                   </span>
                 )}
               </summary>
@@ -345,7 +473,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
             <li key={child.id}>
               <div
                 className={`file-item ${isActive ? 'active' : ''}`}
-                onClick={() => setActiveFileId(child.id!)}
+                onClick={() => {
+                  if (!openTabIds.includes(child.id!)) {
+                    setOpenTabIds(prev => [...prev, child.id!]);
+                  }
+                  setActiveFileId(child.id!);
+                }}
                 draggable={!isReadOnly}
                 onDragStart={(e) => handleDragStart(e, child.id!, 'file', child.path)}
                 onDragOver={handleDragOver}
@@ -379,13 +512,25 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                   />
                 )}
                 {!isReadOnly && (
-                  <button
-                    className="btn btn-ghost-danger"
-                    onClick={(e) => handleDeleteFile(e, child.id!)}
-                    title="Delete file"
-                  >
-                    <X size={12} />
-                  </button>
+                  <>
+                    <button
+                      className="btn btn-ghost-danger"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleUploadButtonClick(child.path.split('/').slice(0, -1).join('/'));
+                      }}
+                      title="Upload files to this location"
+                    >
+                      <Upload size={12} />
+                    </button>
+                    <button
+                      className="btn btn-ghost-danger"
+                      onClick={(e) => handleDeleteFile(e, child.id!)}
+                      title="Delete file"
+                    >
+                      <X size={12} />
+                    </button>
+                  </>
                 )}
               </div>
             </li>
@@ -393,8 +538,6 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         }
       });
   };
-
-  const activeTabName = activeFile?.name.split('/').pop();
 
   return (
     <div className="app-container">
@@ -408,6 +551,9 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
             <div className="sidebar-actions">
+              <button className="btn btn-icon" onClick={() => handleUploadButtonClick('')} title="Upload files">
+                <Upload size={16} />
+              </button>
               <button className="btn btn-icon" onClick={() => handleAddFile('')} title="New file">
                 <FilePlus size={16} />
               </button>
@@ -437,7 +583,9 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       <div className="main-area">
         <div className="top-bar">
           <div className="tab-list">
-            {files.map(file => {
+            {openTabIds.map(tabId => {
+              const file = files.find(f => f.id === tabId);
+              if (!file) return null;
               const fileName = file.name.split('/').pop() || file.name;
               const isActive = file.id === activeFileId;
               return (
@@ -448,18 +596,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                 >
                   <FileText size={13} />
                   {fileName}
-                  {!isReadOnly && files.length > 1 && (
-                    <span
-                      className="tab-close"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteFile(e as unknown as React.MouseEvent, file.id);
-                      }}
-                      title="Close"
-                    >
-                      <X size={10} />
-                    </span>
-                  )}
+                  <span
+                    className="tab-close"
+                    onClick={(e) => handleCloseTab(e as unknown as React.MouseEvent, file.id)}
+                    title="Close"
+                  >
+                    <X size={10} />
+                  </span>
                 </button>
               );
             })}
@@ -532,6 +675,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span>{toastMessage}</span>
         </div>
       )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFileInputChange}
+      />
     </div>
   );
 }
