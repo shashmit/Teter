@@ -16,7 +16,8 @@ import {
   Code2,
   Pencil,
   Eye,
-  Upload,
+  FileUp,
+  FolderUp,
   Download,
   MoreVertical,
 } from 'lucide-react';
@@ -84,6 +85,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const [folderRenameValue, setFolderRenameValue] = useState<string>('');
   const [activeMenuPath, setActiveMenuPath] = useState<string | null>(null);
   const folderInputRef = React.useRef<HTMLInputElement>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Close dropdown menus on outside click
   React.useEffect(() => {
@@ -188,7 +190,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     folderInputRef.current?.click();
   };
 
-  const handleFolderInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUploadClick = (targetPath: string = '') => {
+    if (isReadOnly) return;
+    setPendingUploadPath(targetPath);
+    fileInputRef.current?.click();
+  };
+
+  const handleUploadInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files;
     if (!selected || !selected.length) return;
     await uploadFilesAtPath(selected, pendingUploadPath);
@@ -583,8 +591,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
               onClick: () => handleAddFolder(child.path)
             },
             {
+              label: 'Upload Files',
+              icon: <FileUp size={14} />,
+              onClick: () => handleFileUploadClick(child.path)
+            },
+            {
               label: 'Upload Folder',
-              icon: <Upload size={14} />,
+              icon: <FolderUp size={14} />,
               onClick: () => handleFolderUploadClick(child.path)
             },
             {
@@ -751,8 +764,11 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
             <div className="sidebar-actions">
+              <button className="btn btn-icon" onClick={() => handleFileUploadClick('')} title="Upload files">
+                <FileUp size={16} />
+              </button>
               <button className="btn btn-icon" onClick={() => handleFolderUploadClick('')} title="Upload folder">
-                <Upload size={16} />
+                <FolderUp size={16} />
               </button>
               <button className="btn btn-icon" onClick={() => handleAddFile('')} title="New file">
                 <FilePlus size={16} />
@@ -877,12 +893,21 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         ref={folderInputRef}
         type="file"
         style={{ display: 'none' }}
-        onChange={handleFolderInputChange}
+        onChange={handleUploadInputChange}
         {...({
           webkitdirectory: "",
           directory: "",
           multiple: true
         } as React.InputHTMLAttributes<HTMLInputElement>)}
+      />
+
+      {/* Hidden multi-file input for uploads */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleUploadInputChange}
       />
 
       {/* Delete Project Confirmation Modal */}
