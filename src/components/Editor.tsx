@@ -17,8 +17,11 @@ import {
   Pencil,
   Eye,
   Upload,
+  Download,
   MoreVertical,
 } from 'lucide-react';
+
+import { createZip, downloadBlob } from '@/lib/zip';
 
 export interface CodeFile {
   id: string;
@@ -225,6 +228,27 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     });
 
     showToast(`Renamed folder to ${newFolderName}`);
+  };
+
+  const handleFolderDownload = (folderPath: string) => {
+    const prefix = folderPath + '/';
+    const entries = files
+      .filter(f => f.name === folderPath || f.name.startsWith(prefix))
+      .map(f => ({
+        path: f.name.startsWith(prefix) ? f.name.slice(prefix.length) : f.name,
+        content: f.content,
+      }))
+      .filter(e => e.path.length > 0);
+
+    if (entries.length === 0) {
+      showToast('Folder is empty');
+      return;
+    }
+
+    const folderName = folderPath.split('/').pop() || 'folder';
+    const blob = createZip(entries);
+    downloadBlob(blob, `${folderName}.zip`);
+    showToast(`Downloaded ${folderName}.zip`);
   };
 
   const handleFolderDelete = (folderPath: string) => {
@@ -562,6 +586,11 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
               label: 'Upload Folder',
               icon: <Upload size={14} />,
               onClick: () => handleFolderUploadClick(child.path)
+            },
+            {
+              label: 'Download Folder',
+              icon: <Download size={14} />,
+              onClick: () => handleFolderDownload(child.path)
             },
             {
               label: 'Rename Folder',
