@@ -9,7 +9,6 @@ import {
   FolderPlus,
   FilePlus,
   X,
-  Link2,
   Copy,
   Save,
   Trash2,
@@ -18,6 +17,7 @@ import {
   Pencil,
   Eye,
   Upload,
+  MoreVertical,
 } from 'lucide-react';
 
 export interface CodeFile {
@@ -76,7 +76,20 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const [toastMessage, setToastMessage] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']));
   const [pendingUploadPath, setPendingUploadPath] = useState('');
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [editingFolderPath, setEditingFolderPath] = useState<string | null>(null);
+  const [folderRenameValue, setFolderRenameValue] = useState<string>('');
+  const [activeMenuPath, setActiveMenuPath] = useState<string | null>(null);
+  const folderInputRef = React.useRef<HTMLInputElement>(null);
+
+  // Close dropdown menus on outside click
+  React.useEffect(() => {
+    const handleOutsideClick = () => {
+      setActiveMenuPath(null);
+    };
+    window.addEventListener('click', handleOutsideClick);
+    return () => window.removeEventListener('click', handleOutsideClick);
+  }, []);
 
   const activeFile = files.find(f => f.id === activeFileId);
   const tree = useMemo(() => buildTree(files), [files]);
@@ -155,8 +168,6 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       );
       setFiles(prev => [...prev, ...uploadedFiles]);
       setExpandedFolders(nextExpanded);
-      setOpenTabIds(prev => [...prev, ...uploadedFiles.map(f => f.id)]);
-      setActiveFileId(uploadedFiles[0].id);
       showToast(
         uploadedFiles.length === 1
           ? `Uploaded ${uploadedFiles[0].name.split('/').pop()}`
@@ -168,17 +179,87 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
   };
 
-  const handleUploadButtonClick = (targetPath: string = '') => {
+  const handleFolderUploadClick = (targetPath: string = '') => {
     if (isReadOnly) return;
     setPendingUploadPath(targetPath);
-    fileInputRef.current?.click();
+    folderInputRef.current?.click();
   };
 
-  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFolderInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files;
     if (!selected || !selected.length) return;
     await uploadFilesAtPath(selected, pendingUploadPath);
     e.target.value = '';
+  };
+
+  const handleFolderRename = (oldPath: string, newFolderName: string) => {
+    if (isReadOnly) return;
+    const parts = oldPath.split('/');
+    parts.pop();
+    const newFolderPath = parts.length > 0 ? `${parts.join('/')}/${newFolderName}` : newFolderName;
+
+    setFiles(prev => prev.map(f => {
+      if (f.name.startsWith(oldPath + '/')) {
+        const restOfPath = f.name.substring(oldPath.length);
+        return { ...f, name: `${newFolderPath}${restOfPath}` };
+      }
+      if (f.name === oldPath) {
+        return { ...f, name: newFolderPath };
+      }
+      return f;
+    }));
+
+    setExpandedFolders(prev => {
+      const next = new Set<string>();
+      prev.forEach(path => {
+        if (path.startsWith(oldPath + '/')) {
+          const restOfPath = path.substring(oldPath.length);
+          next.add(`${newFolderPath}${restOfPath}`);
+        } else if (path === oldPath) {
+          next.add(newFolderPath);
+        } else {
+          next.add(path);
+        }
+      });
+      return next;
+    });
+
+    showToast(`Renamed folder to ${newFolderName}`);
+  };
+
+  const handleFolderDelete = (folderPath: string) => {
+    if (isReadOnly) return;
+
+    const newFiles = files.filter(f => f.name !== folderPath && !f.name.startsWith(folderPath + '/'));
+
+    if (newFiles.length === 0) {
+      showToast('Cannot delete the last folder containing the only file.');
+      return;
+    }
+
+    setFiles(newFiles);
+
+    const deletedFileIds = files
+      .filter(f => f.name === folderPath || f.name.startsWith(folderPath + '/'))
+      .map(f => f.id);
+    const newTabs = openTabIds.filter(id => !deletedFileIds.includes(id));
+    setOpenTabIds(newTabs);
+
+    if (deletedFileIds.includes(activeFileId)) {
+      setActiveFileId(newTabs[newTabs.length - 1] || '');
+    }
+
+    setExpandedFolders(prev => {
+      const next = new Set<string>();
+      prev.forEach(path => {
+        if (path !== folderPath && !path.startsWith(folderPath + '/')) {
+          next.add(path);
+        }
+      });
+      return next;
+    });
+
+    showToast(`Deleted folder and all contents`);
   };
 
   const handleDrop = (e: React.DragEvent, targetPath: string) => {
@@ -242,8 +323,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
     newExpanded.add(fullPath);
     setExpandedFolders(newExpanded);
-    setOpenTabIds(prev => [...prev, newFile.id]);
-    setActiveFileId(newFile.id);
+    // Don't auto-open the placeholder file in editor
   };
 
   const showToast = (msg: string) => {
@@ -364,13 +444,6 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     return () => clearTimeout(timer);
   }, [files]);
 
-  const handleCopyLink = () => {
-    if (typeof window !== 'undefined') {
-      navigator.clipboard.writeText(window.location.href);
-      showToast('Link copied to clipboard');
-    }
-  };
-
   const handleCopyCode = () => {
     if (activeFile?.content) {
       navigator.clipboard.writeText(activeFile.content);
@@ -403,6 +476,67 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     setExpandedFolders(newExpanded);
   };
 
+  // Dynamic action rendering: <2 options = direct button, >=2 options = three-dot menu
+  interface ActionOption {
+    label: string;
+    icon: React.ReactNode;
+    onClick: (e: React.MouseEvent) => void;
+    danger?: boolean;
+  }
+
+  const renderItemActions = (options: ActionOption[], pathOrId: string) => {
+    if (options.length === 0) return null;
+
+    // Less than 2 options: show button directly
+    if (options.length < 2) {
+      const opt = options[0];
+      return (
+        <div className="item-actions-wrapper" onClick={(e) => e.stopPropagation()}>
+          <button
+            className={`action-menu-btn ${opt.danger ? 'hover-danger' : ''}`}
+            onClick={opt.onClick}
+            title={opt.label}
+          >
+            {opt.icon}
+          </button>
+        </div>
+      );
+    }
+
+    // 2 or more options: show three-dot dropdown menu
+    return (
+      <div className="item-actions-wrapper" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="action-menu-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            setActiveMenuPath(prev => prev === pathOrId ? null : pathOrId);
+          }}
+          title="Actions"
+        >
+          <MoreVertical size={14} />
+        </button>
+        {activeMenuPath === pathOrId && (
+          <div className="item-dropdown-menu" onClick={(e) => e.stopPropagation()}>
+            {options.map((opt, idx) => (
+              <button
+                key={idx}
+                className={`item-dropdown-item ${opt.danger ? 'danger' : ''}`}
+                onClick={(e) => {
+                  setActiveMenuPath(null);
+                  opt.onClick(e);
+                }}
+              >
+                {opt.icon}
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderTreeNodes = (node: TreeNode, depth = 0) => {
     return Object.values(node.children)
       .sort((a, b) => {
@@ -412,6 +546,43 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       .map(child => {
         if (child.type === 'folder') {
           const isExpanded = expandedFolders.has(child.path);
+
+          const folderOptions: ActionOption[] = [
+            {
+              label: 'New File',
+              icon: <FilePlus size={14} />,
+              onClick: () => handleAddFile(child.path)
+            },
+            {
+              label: 'New Folder',
+              icon: <FolderPlus size={14} />,
+              onClick: () => handleAddFolder(child.path)
+            },
+            {
+              label: 'Upload Folder',
+              icon: <Upload size={14} />,
+              onClick: () => handleFolderUploadClick(child.path)
+            },
+            {
+              label: 'Rename Folder',
+              icon: <Pencil size={14} />,
+              onClick: () => {
+                setEditingFolderPath(child.path);
+                setFolderRenameValue(child.name);
+              }
+            },
+            {
+              label: 'Delete Folder',
+              icon: <Trash2 size={14} />,
+              danger: true,
+              onClick: () => {
+                if (confirm(`Are you sure you want to delete the folder "${child.name}" and all of its contents?`)) {
+                  handleFolderDelete(child.path);
+                }
+              }
+            }
+          ];
+
           return (
             <details key={child.path} open={isExpanded}>
               <summary
@@ -432,35 +603,36 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                   />
                   {isExpanded ? <FolderOpen size={15} /> : <FolderClosed size={15} />}
                 </span>
-                <span style={{ flex: 1 }}>{child.name}</span>
-                {!isReadOnly && (
-                  <span style={{ display: 'flex', gap: 2, marginLeft: 4 }}>
-                    <button
-                      className="btn btn-ghost-danger"
-                      onClick={(e) => { e.stopPropagation(); handleAddFile(child.path); }}
-                      title="Add file"
-                      style={{ color: 'var(--text-muted)' }}
-                    >
-                      <FilePlus size={13} />
-                    </button>
-                    <button
-                      className="btn btn-ghost-danger"
-                      onClick={(e) => { e.stopPropagation(); handleAddFolder(child.path); }}
-                      title="Add folder"
-                      style={{ color: 'var(--text-muted)' }}
-                    >
-                      <FolderPlus size={13} />
-                    </button>
-                    <button
-                      className="btn btn-ghost-danger"
-                      onClick={(e) => { e.stopPropagation(); handleUploadButtonClick(child.path); }}
-                      title="Upload files here"
-                      style={{ color: 'var(--text-muted)' }}
-                    >
-                      <Upload size={13} />
-                    </button>
-                  </span>
+                {editingFolderPath === child.path ? (
+                  <input
+                    type="text"
+                    className="file-name-input"
+                    value={folderRenameValue}
+                    onChange={(e) => setFolderRenameValue(e.target.value)}
+                    onBlur={() => {
+                      if (folderRenameValue.trim() && folderRenameValue.trim() !== child.name) {
+                        handleFolderRename(child.path, folderRenameValue.trim());
+                      }
+                      setEditingFolderPath(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        if (folderRenameValue.trim() && folderRenameValue.trim() !== child.name) {
+                          handleFolderRename(child.path, folderRenameValue.trim());
+                        }
+                        setEditingFolderPath(null);
+                      } else if (e.key === 'Escape') {
+                        setEditingFolderPath(null);
+                      }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    autoFocus
+                    style={{ flex: 1 }}
+                  />
+                ) : (
+                  <span style={{ flex: 1 }}>{child.name}</span>
                 )}
+                {!isReadOnly && renderItemActions(folderOptions, child.path)}
               </summary>
               <ul>
                 {renderTreeNodes(child, depth + 1)}
@@ -469,6 +641,16 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           );
         } else {
           const isActive = activeFileId === child.id;
+
+          const fileOptions: ActionOption[] = [
+            {
+              label: 'Delete file',
+              icon: <Trash2 size={13} />,
+              danger: true,
+              onClick: (e: React.MouseEvent) => handleDeleteFile(e, child.id!)
+            }
+          ];
+
           return (
             <li key={child.id}>
               <div
@@ -498,40 +680,29 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                   <input
                     type="text"
                     className="file-name-input"
-                    value={files.find(f => f.id === child.id)?.name.split('/').pop() || ''}
+                    value={(() => {
+                      const fullPath = files.find(f => f.id === child.id)?.name || '';
+                      const baseNameWithExt = fullPath.split('/').pop() || '';
+                      const lastDotIndex = baseNameWithExt.lastIndexOf('.');
+                      return lastDotIndex !== -1 ? baseNameWithExt.substring(0, lastDotIndex) : baseNameWithExt;
+                    })()}
                     onChange={(e) => {
-                      const parts = (files.find(f => f.id === child.id)?.name || '').split('/');
-                      parts[parts.length - 1] = e.target.value;
+                      const fullPath = (files.find(f => f.id === child.id)?.name || '');
+                      const parts = fullPath.split('/');
+                      const baseNameWithExt = parts[parts.length - 1];
+                      const lastDotIndex = baseNameWithExt.lastIndexOf('.');
+                      const extension = lastDotIndex !== -1 ? baseNameWithExt.substring(lastDotIndex) : '';
+                      parts[parts.length - 1] = e.target.value + extension;
                       handleFileNameChange(
                         { ...e, target: { ...e.target, value: parts.join('/') } } as unknown as React.ChangeEvent<HTMLInputElement>,
                         child.id!
                       );
                     }}
                     onClick={(e) => e.stopPropagation()}
-                    placeholder="filename.txt"
+                    placeholder="filename"
                   />
                 )}
-                {!isReadOnly && (
-                  <>
-                    <button
-                      className="btn btn-ghost-danger"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleUploadButtonClick(child.path.split('/').slice(0, -1).join('/'));
-                      }}
-                      title="Upload files to this location"
-                    >
-                      <Upload size={12} />
-                    </button>
-                    <button
-                      className="btn btn-ghost-danger"
-                      onClick={(e) => handleDeleteFile(e, child.id!)}
-                      title="Delete file"
-                    >
-                      <X size={12} />
-                    </button>
-                  </>
-                )}
+                {!isReadOnly && renderItemActions(fileOptions, child.path)}
               </div>
             </li>
           );
@@ -551,7 +722,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
             <div className="sidebar-actions">
-              <button className="btn btn-icon" onClick={() => handleUploadButtonClick('')} title="Upload files">
+              <button className="btn btn-icon" onClick={() => handleFolderUploadClick('')} title="Upload folder">
                 <Upload size={16} />
               </button>
               <button className="btn btn-icon" onClick={() => handleAddFile('')} title="New file">
@@ -577,6 +748,16 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
             {renderTreeNodes(tree)}
           </ul>
         </div>
+
+        {/* Delete Project button in sidebar footer */}
+        {currentSnippetId && (
+          <div className="sidebar-footer">
+            <button className="btn btn-danger w-full" onClick={() => setIsDeleteConfirmOpen(true)}>
+              <Trash2 size={14} />
+              Delete Project
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Main Area */}
@@ -609,13 +790,6 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           </div>
 
           <div className="header-actions">
-            {currentSnippetId && (
-              <button className="btn btn-outline" onClick={handleCopyLink}>
-                <Link2 size={14} />
-                Share
-              </button>
-            )}
-
             <button className="btn btn-outline" onClick={handleCopyCode}>
               <Copy size={14} />
               Copy
@@ -623,7 +797,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
             {currentSnippetId && (
               <button
-                className={`btn ${isReadOnly ? 'btn-outline' : 'btn-outline'}`}
+                className="btn btn-outline"
                 onClick={() => setIsReadOnly(!isReadOnly)}
                 title={isReadOnly ? 'Switch to edit mode' : 'Switch to view mode'}
               >
@@ -636,13 +810,6 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
               <button className="btn btn-primary" onClick={() => handleSave(false)} disabled={isSaving}>
                 <Save size={14} />
                 {isSaving ? 'Saving...' : 'Save'}
-              </button>
-            )}
-
-            {currentSnippetId && (
-              <button className="btn btn-danger" onClick={handleDeleteSnippet}>
-                <Trash2 size={14} />
-                Delete
               </button>
             )}
           </div>
@@ -675,13 +842,45 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span>{toastMessage}</span>
         </div>
       )}
+
+      {/* Hidden folder input for uploads */}
       <input
-        ref={fileInputRef}
+        ref={folderInputRef}
         type="file"
-        multiple
         style={{ display: 'none' }}
-        onChange={handleFileInputChange}
+        onChange={handleFolderInputChange}
+        {...({
+          webkitdirectory: "",
+          directory: "",
+          multiple: true
+        } as React.InputHTMLAttributes<HTMLInputElement>)}
       />
+
+      {/* Delete Project Confirmation Modal */}
+      {isDeleteConfirmOpen && (
+        <div className="modal-overlay" onClick={() => setIsDeleteConfirmOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <span className="modal-title">Delete Project</span>
+            <p className="modal-description">
+              Are you sure you want to delete this project? This action is permanent and will delete all files and the project page itself.
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-outline" onClick={() => setIsDeleteConfirmOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  setIsDeleteConfirmOpen(false);
+                  handleDeleteSnippet();
+                }}
+              >
+                Delete Project
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
