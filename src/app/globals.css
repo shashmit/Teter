@@ -26,6 +26,9 @@
   --border: #E2D9CF;
   --border-light: #EDE7E0;
 
+  --danger: #C0392B;
+  --danger-surface: rgba(192, 57, 43, 0.08);
+
   --shadow-sm: 0 1px 3px rgba(61, 43, 31, 0.08), 0 1px 2px rgba(61, 43, 31, 0.06);
   --shadow-md: 0 4px 12px rgba(61, 43, 31, 0.08), 0 2px 4px rgba(61, 43, 31, 0.04);
   --shadow-lg: 0 12px 32px rgba(61, 43, 31, 0.10), 0 4px 8px rgba(61, 43, 31, 0.06);
@@ -415,6 +418,81 @@ body {
   gap: 6px;
 }
 
+/* Save status */
+.save-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color var(--transition), background var(--transition);
+}
+
+.save-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 22ch;
+}
+
+.save-status.is-saved {
+  color: var(--text-muted);
+}
+
+.save-status.is-saving,
+.save-status.is-unsaved {
+  color: var(--text-secondary);
+}
+
+.save-status.is-error {
+  color: var(--danger);
+  background: var(--danger-surface);
+}
+
+.save-status-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+  padding: 3px 8px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.save-status-retry:hover {
+  background: var(--danger);
+  color: var(--text-on-primary);
+}
+
+/* Toggle buttons (soft wrap) */
+.btn-icon.is-active {
+  background: var(--primary-surface);
+  color: var(--primary);
+}
+
+/* Visually hidden, still announced */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Editor */
 .editor-area {
   flex: 1;
@@ -430,21 +508,121 @@ body {
   overflow: hidden;
 }
 
-.code-textarea {
+/*
+ * Code surface.
+ *
+ * A syntax-highlighted <pre> sits underneath a transparent-text <textarea>.
+ * The overlay defines the content box; the textarea is stretched to match it
+ * exactly and never scrolls itself, so `.code-surface` is the single scroll
+ * container and no JS scroll syncing is needed. Every metric marked "must
+ * match" below is load-bearing: if the two boxes diverge, the caret drifts
+ * away from the glyphs beneath it.
+ */
+.code-surface {
+  --code-font: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
+  --code-font-size: 14px;
+  --code-line-height: 1.7;
+  --code-pad-y: 20px;
+  --code-pad-x: 24px;
+  --gutter-width: 4ch;
+
+  position: relative;
   flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-elevated);
+}
+
+.code-inner {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  width: max-content;
+}
+
+.code-surface.is-wrapped .code-inner {
   width: 100%;
-  resize: none;
+}
+
+.code-overlay {
+  margin: 0;
+  /* must match .code-textarea */
+  padding: var(--code-pad-y) 0;
+  font-family: var(--code-font);
+  font-size: var(--code-font-size);
+  line-height: var(--code-line-height);
+  tab-size: 4;
+  color: var(--text-primary);
+  pointer-events: none;
+  user-select: none;
+}
+
+.code-line {
+  display: flex;
+  /* Stops blank lines collapsing; wrapped lines grow past it. */
+  min-height: calc(var(--code-font-size) * var(--code-line-height));
+}
+
+.code-line-number {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: none;
+  width: var(--gutter-width);
+  padding-right: 16px;
+  text-align: right;
+  color: var(--text-muted);
+  /* Opaque so code scrolling horizontally passes behind it. */
+  background: var(--bg-elevated);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.code-line-content {
+  flex: none;
+  white-space: pre;
+  padding-right: var(--code-pad-x);
+}
+
+.code-surface.is-wrapped .code-line-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.code-textarea {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  /* must match .code-overlay padding + gutter width */
+  padding: var(--code-pad-y) var(--code-pad-x) var(--code-pad-y) var(--gutter-width);
   border: none;
   outline: none;
-  padding: 20px 24px;
-  font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--text-primary);
-  background: var(--bg-elevated);
-  white-space: pre;
-  overflow: auto;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  /* Glyphs come from the overlay; only the caret and selection show here. */
+  color: transparent;
+  caret-color: var(--text-primary);
+  font-family: var(--code-font);
+  font-size: var(--code-font-size);
+  line-height: var(--code-line-height);
   tab-size: 4;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.code-surface.is-wrapped .code-textarea {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.code-textarea::selection {
+  background: rgba(123, 45, 59, 0.22);
 }
 
 .code-textarea::placeholder {
@@ -452,8 +630,23 @@ body {
   font-style: italic;
 }
 
-.code-textarea:focus {
-  background: #FFFCFA;
+/*
+ * Very large files drop the overlay entirely (see GUTTER_MAX_LINES): the
+ * textarea renders its own visible text and scrolls natively.
+ */
+.code-surface.is-plain {
+  overflow: hidden;
+}
+
+.code-surface.is-plain .code-inner {
+  width: 100%;
+  height: 100%;
+}
+
+.code-surface.is-plain .code-textarea {
+  padding-left: var(--code-pad-x);
+  color: var(--text-primary);
+  overflow: auto;
 }
 
 /* Hero */
@@ -573,6 +766,27 @@ body {
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+.animate-spin {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin {
+    animation-duration: 2.4s;
+  }
+
+  .animate-fade-in,
+  .toast,
+  .modal-card,
+  .item-dropdown-menu {
+    animation: none;
+  }
 }
 
 /* Responsive */
