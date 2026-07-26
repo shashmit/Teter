@@ -21,10 +21,14 @@ import {
   Download,
   MoreVertical,
   WrapText,
+  Plus,
+  Upload,
 } from 'lucide-react';
 
 import CodeEditor from '@/components/CodeEditor';
+import MenuButton from '@/components/MenuButton';
 import SaveStatus, { type SaveState } from '@/components/SaveStatus';
+import { flattenDropEntries, readDropEntries } from '@/lib/drop-files';
 import { createZip, downloadBlob } from '@/lib/zip';
 import {
   createFileBlob,
@@ -94,6 +98,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     initialSnippetId ? { status: 'saved' } : { status: 'idle' }
   );
   const [softWrap, setSoftWrap] = useState(false);
+  const [isRootDropActive, setIsRootDropActive] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']));
   const [pendingUploadPath, setPendingUploadPath] = useState('');
@@ -124,6 +129,10 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
   };
+
+  /** Distinguishes an OS file drag from an internal file/folder move. */
+  const dragCarriesFiles = (dataTransfer: DataTransfer) =>
+    Array.from(dataTransfer.types).includes('Files');
 
   const expandPath = (path: string, target: Set<string>) => {
     if (!path) return;
@@ -333,10 +342,25 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     e.stopPropagation();
     if (isReadOnly) return;
     try {
+      // Read entries synchronously: DataTransfer is neutered after this handler
+      // returns, and only the entries API can describe dropped directories.
+      const droppedEntries = readDropEntries(e.dataTransfer);
+      if (droppedEntries.length > 0) {
+        void flattenDropEntries(droppedEntries)
+          .then(dropped => uploadFilesAtPath(dropped, targetPath))
+          .catch(error => {
+            console.error('Drop error:', error);
+            showToast('Could not read the dropped items');
+          });
+        return;
+      }
+
+      // Browsers without the entries API still hand over plain files.
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
         void uploadFilesAtPath(e.dataTransfer.files, targetPath);
         return;
       }
+
       const dataStr = e.dataTransfer.getData('text/plain');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
@@ -484,9 +508,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     return `Save failed (${response.status})`;
   };
 
+  /*
+   * Deliberately not gated on `isReadOnly`. Auto-saves are already suppressed in
+   * view mode by the effect below, and the Save button only renders while
+   * editing. Blocking here instead would strand a failed save's changes the
+   * moment the user switched to view mode, leaving an inert Retry button.
+   */
   const runSave = React.useCallback(async (auto: boolean) => {
-    if (isReadOnly) return;
-
     if (isSavingRef.current) {
       resavePendingRef.current = true;
       return;
@@ -550,7 +578,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         void runSaveRef.current(true);
       }
     }
-  }, [isReadOnly]);
+  }, []);
 
   runSaveRef.current = runSave;
 
@@ -915,34 +943,77 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
             <div className="sidebar-actions">
-              <button className="btn btn-icon" onClick={() => handleFileUploadClick('')} title="Upload files">
-                <FileUp size={16} />
-              </button>
-              <button className="btn btn-icon" onClick={() => handleFolderUploadClick('')} title="Upload folder">
-                <FolderUp size={16} />
-              </button>
-              <button className="btn btn-icon" onClick={() => handleAddFile('')} title="New file">
-                <FilePlus size={16} />
-              </button>
-              <button className="btn btn-icon" onClick={() => handleAddFolder('')} title="New folder">
-                <FolderPlus size={16} />
-              </button>
+              <MenuButton
+                icon={<Upload size={16} />}
+                label="Upload"
+                actions={[
+                  {
+                    label: 'Upload files',
+                    icon: <FileUp size={14} />,
+                    hint: 'One or many',
+                    onSelect: () => handleFileUploadClick(''),
+                  },
+                  {
+                    label: 'Upload folder',
+                    icon: <FolderUp size={14} />,
+                    hint: 'Keeps structure',
+                    onSelect: () => handleFolderUploadClick(''),
+                  },
+                ]}
+              />
+              <MenuButton
+                icon={<Plus size={17} />}
+                label="Create"
+                actions={[
+                  {
+                    label: 'New file',
+                    icon: <FilePlus size={14} />,
+                    onSelect: () => handleAddFile(''),
+                  },
+                  {
+                    label: 'New folder',
+                    icon: <FolderPlus size={14} />,
+                    onSelect: () => handleAddFolder(''),
+                  },
+                ]}
+              />
             </div>
           )}
         </div>
 
-        <div className="file-list-container">
-          <ul
-            className="tree-view"
-            onDragOver={handleDragOver}
-            onDrop={(e) => {
-              if (e.target === e.currentTarget) {
-                handleDrop(e, '');
-              }
-            }}
-          >
+        {/*
+          The whole list is the root drop target. Child folders call
+          stopPropagation in handleDrop, so this only handles drops that land on
+          empty space — previously that was just the bare <ul>, a sliver.
+        */}
+        <div
+          className={`file-list-container ${isRootDropActive ? 'is-drop-target' : ''}`}
+          onDragOver={(e) => {
+            handleDragOver(e);
+            if (!isReadOnly && dragCarriesFiles(e.dataTransfer)) {
+              e.dataTransfer.dropEffect = 'copy';
+              setIsRootDropActive(true);
+            }
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              setIsRootDropActive(false);
+            }
+          }}
+          onDrop={(e) => {
+            setIsRootDropActive(false);
+            handleDrop(e, '');
+          }}
+        >
+          <ul className="tree-view">
             {renderTreeNodes(tree)}
           </ul>
+
+          {!isReadOnly && (
+            <p className="drop-hint" aria-hidden="true">
+              Drop files or folders here
+            </p>
+          )}
         </div>
 
         {/* Delete Project button in sidebar footer */}
