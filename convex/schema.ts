@@ -16,5 +16,8 @@ export default defineSchema({
         fileId: v.string(),
         name: v.string(),
         content: v.string(),
+        encoding: v.optional(v.literal("base64")),
+        mimeType: v.optional(v.string()),
+        size: v.optional(v.number()),
     }).index("by_snippetId", ["snippetId"]),
 });

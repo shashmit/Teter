@@ -5,6 +5,9 @@ interface CodeFilePayload {
     id: string;
     name: string;
     content: string;
+    encoding?: 'base64';
+    mimeType?: string;
+    size?: number;
 }
 
 interface SnippetResponse {

@@ -472,6 +472,14 @@ body {
   font-weight: 500;
 }
 
+.binary-file-message span {
+  font-size: 12px;
+}
+
+.binary-file-message .btn {
+  margin-top: 4px;
+}
+
 /* Toast */
 .toast {
   position: fixed;
@@ -904,4 +912,3 @@ body {
   gap: 10px;
   margin-top: 8px;
 }
-

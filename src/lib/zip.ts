@@ -16,11 +16,11 @@ function crc32(data: Uint8Array): number {
 
 export interface ZipEntry {
   path: string;
-  content: string;
+  content: string | Uint8Array;
 }
 
 // Builds a ZIP archive using the "stored" (uncompressed) method.
-// Sufficient for small text payloads; produces a valid .zip readable everywhere.
+// Supports text and binary payloads and produces a valid .zip readable everywhere.
 export function createZip(entries: ZipEntry[]): Blob {
   const encoder = new TextEncoder();
   const parts: Uint8Array[] = [];
@@ -29,7 +29,9 @@ export function createZip(entries: ZipEntry[]): Blob {
 
   for (const entry of entries) {
     const nameBytes = encoder.encode(entry.path);
-    const contentBytes = encoder.encode(entry.content);
+    const contentBytes = typeof entry.content === 'string'
+      ? encoder.encode(entry.content)
+      : entry.content;
     const crc = crc32(contentBytes);
     const size = contentBytes.length;
 

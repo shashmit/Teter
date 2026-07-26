@@ -5,6 +5,9 @@ const codeFileValidator = v.object({
     id: v.string(),
     name: v.string(),
     content: v.string(),
+    encoding: v.optional(v.literal("base64")),
+    mimeType: v.optional(v.string()),
+    size: v.optional(v.number()),
 });
 
 export const create = mutation({
@@ -46,6 +49,9 @@ export const create = mutation({
                     fileId: file.id,
                     name: file.name,
                     content: file.content,
+                    encoding: file.encoding,
+                    mimeType: file.mimeType,
+                    size: file.size,
                 })
             )
         );
@@ -85,6 +91,9 @@ export const getByShortId = query({
                 id: file.fileId,
                 name: file.name,
                 content: file.content,
+                encoding: file.encoding,
+                mimeType: file.mimeType,
+                size: file.size,
             }))
             : (snippet.filesJson ? JSON.parse(snippet.filesJson) : []);
             
@@ -178,6 +187,9 @@ export const update = mutation({
                         fileId: file.id,
                         name: file.name,
                         content: file.content,
+                        encoding: file.encoding,
+                        mimeType: file.mimeType,
+                        size: file.size,
                     })
                 )
             );

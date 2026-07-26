@@ -23,11 +23,22 @@ import {
 } from 'lucide-react';
 
 import { createZip, downloadBlob } from '@/lib/zip';
+import {
+  createFileBlob,
+  formatFileSize,
+  getFileBytes,
+  getFileSize,
+  readFileContent,
+  type FileEncoding,
+} from '@/lib/file-content';
 
 export interface CodeFile {
   id: string;
   name: string;
   content: string;
+  encoding?: FileEncoding;
+  mimeType?: string;
+  size?: number;
 }
 
 interface EditorProps {
@@ -164,10 +175,11 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           const uniquePath = getUniquePath(desiredPath, existingPaths);
           const parent = uniquePath.split('/').slice(0, -1).join('/');
           expandPath(parent, nextExpanded);
+          const storedContent = await readFileContent(file);
           return {
             id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
             name: uniquePath,
-            content: await file.text(),
+            ...storedContent,
           };
         })
       );
@@ -244,7 +256,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       .filter(f => f.name === folderPath || f.name.startsWith(prefix))
       .map(f => ({
         path: f.name.startsWith(prefix) ? f.name.slice(prefix.length) : f.name,
-        content: f.content,
+        content: getFileBytes(f),
       }))
       .filter(e => e.path.length > 0);
 
@@ -254,9 +266,25 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
 
     const folderName = folderPath.split('/').pop() || 'folder';
-    const blob = createZip(entries);
-    downloadBlob(blob, `${folderName}.zip`);
-    showToast(`Downloaded ${folderName}.zip`);
+    try {
+      const blob = createZip(entries);
+      downloadBlob(blob, `${folderName}.zip`);
+      showToast(`Downloaded ${folderName}.zip`);
+    } catch (error) {
+      console.error('Folder download error:', error);
+      showToast('Failed to download folder');
+    }
+  };
+
+  const handleFileDownload = (file: CodeFile) => {
+    try {
+      const fileName = file.name.split('/').pop() || file.name;
+      downloadBlob(createFileBlob(file), fileName);
+      showToast(`Downloaded ${fileName}`);
+    } catch (error) {
+      console.error('File download error:', error);
+      showToast('Failed to download file');
+    }
   };
 
   const handleFolderDelete = (folderPath: string) => {
@@ -477,6 +505,10 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   }, [files]);
 
   const handleCopyCode = () => {
+    if (activeFile?.encoding === 'base64') {
+      showToast('Binary files cannot be copied as text');
+      return;
+    }
     if (activeFile?.content) {
       navigator.clipboard.writeText(activeFile.content);
       showToast('Code copied');
@@ -579,7 +611,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         if (child.type === 'folder') {
           const isExpanded = expandedFolders.has(child.path);
 
-          const folderOptions: ActionOption[] = [
+          const folderOptions: ActionOption[] = isReadOnly ? [
+            {
+              label: 'Download Folder',
+              icon: <Download size={14} />,
+              onClick: () => handleFolderDownload(child.path)
+            }
+          ] : [
             {
               label: 'New File',
               icon: <FilePlus size={14} />,
@@ -674,7 +712,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                 ) : (
                   <span style={{ flex: 1 }}>{child.name}</span>
                 )}
-                {!isReadOnly && renderItemActions(folderOptions, child.path)}
+                {renderItemActions(folderOptions, child.path)}
               </summary>
               <ul>
                 {renderTreeNodes(child, depth + 1)}
@@ -684,13 +722,21 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         } else {
           const isActive = activeFileId === child.id;
 
+          const selectedFile = files.find(file => file.id === child.id);
           const fileOptions: ActionOption[] = [
             {
+              label: 'Download file',
+              icon: <Download size={13} />,
+              onClick: () => {
+                if (selectedFile) handleFileDownload(selectedFile);
+              }
+            },
+            ...(!isReadOnly ? [{
               label: 'Delete file',
               icon: <Trash2 size={13} />,
               danger: true,
               onClick: (e: React.MouseEvent) => handleDeleteFile(e, child.id!)
-            }
+            }] : [])
           ];
 
           return (
@@ -744,7 +790,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                     placeholder="filename"
                   />
                 )}
-                {!isReadOnly && renderItemActions(fileOptions, child.path)}
+                {renderItemActions(fileOptions, child.path)}
               </div>
             </li>
           );
@@ -835,10 +881,22 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           </div>
 
           <div className="header-actions">
-            <button className="btn btn-outline" onClick={handleCopyCode}>
+            <button
+              className="btn btn-outline"
+              onClick={handleCopyCode}
+              disabled={!activeFile || activeFile.encoding === 'base64'}
+              title={activeFile?.encoding === 'base64' ? 'Binary files cannot be copied as text' : 'Copy file contents'}
+            >
               <Copy size={14} />
               Copy
             </button>
+
+            {activeFile && (
+              <button className="btn btn-outline" onClick={() => handleFileDownload(activeFile)}>
+                <Download size={14} />
+                Download
+              </button>
+            )}
 
             {currentSnippetId && (
               <button
@@ -862,7 +920,19 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
         <div className="editor-area">
           <div className="editor-wrapper">
-            {activeFile ? (
+            {activeFile?.encoding === 'base64' ? (
+              <div className="hero-message binary-file-message">
+                <FileText size={48} strokeWidth={1} />
+                <p>{activeFile.name.split('/').pop()} is a binary file</p>
+                <span>
+                  Binary files cannot be edited here · {formatFileSize(getFileSize(activeFile))}
+                </span>
+                <button className="btn btn-primary" onClick={() => handleFileDownload(activeFile)}>
+                  <Download size={14} />
+                  Download file
+                </button>
+              </div>
+            ) : activeFile ? (
               <textarea
                 className="code-textarea"
                 value={activeFile.content}
