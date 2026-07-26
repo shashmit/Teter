@@ -20,8 +20,11 @@ import {
   FolderUp,
   Download,
   MoreVertical,
+  WrapText,
 } from 'lucide-react';
 
+import CodeEditor from '@/components/CodeEditor';
+import SaveStatus, { type SaveState } from '@/components/SaveStatus';
 import { createZip, downloadBlob } from '@/lib/zip';
 import {
   createFileBlob,
@@ -87,7 +90,10 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   );
   const [activeFileId, setActiveFileId] = useState<string>(files[0]?.id || '');
   const [openTabIds, setOpenTabIds] = useState<string[]>(files.map(f => f.id));
-  const [isSaving, setIsSaving] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>(
+    initialSnippetId ? { status: 'saved' } : { status: 'idle' }
+  );
+  const [softWrap, setSoftWrap] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']));
   const [pendingUploadPath, setPendingUploadPath] = useState('');
@@ -442,67 +448,166 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
   };
 
-  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleContentChange = (nextContent: string) => {
     if (isReadOnly) return;
-    setFiles(files.map(f => f.id === activeFileId ? { ...f, content: e.target.value } : f));
+    setFiles(prev => prev.map(f => f.id === activeFileId ? { ...f, content: nextContent } : f));
   };
 
-  const handleSave = async (isAuto = false) => {
-    if (isReadOnly || (isSaving && !isAuto)) return;
-    if (!isAuto) setIsSaving(true);
+  /*
+   * Save bookkeeping.
+   *
+   * `revision` counts edits; `savedRevision` records the revision that last
+   * reached the server. Comparing the two is how the status pill knows whether
+   * there is genuinely unsaved work, without re-serializing every file on each
+   * keystroke.
+   *
+   * Saves never overlap: a request that arrives while one is in flight sets
+   * `resavePending` instead, so the newest state is written once the current
+   * write lands. Firing them concurrently risks an older payload landing last.
+   */
+  const filesRef = React.useRef(files);
+  const snippetIdRef = React.useRef(initialSnippetId);
+  const revisionRef = React.useRef(0);
+  const savedRevisionRef = React.useRef(0);
+  const isSavingRef = React.useRef(false);
+  const resavePendingRef = React.useRef(false);
+  const runSaveRef = React.useRef<(auto: boolean) => Promise<void>>(async () => {});
+
+  const readErrorMessage = async (response: Response) => {
     try {
-      if (currentSnippetId) {
-        const response = await fetch(`/api/snippets/${currentSnippetId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ files })
-        });
-        if (!isAuto) {
-          if (response.ok) {
-            showToast('Snippet updated');
-            setIsReadOnly(true);
-          } else {
-            showToast('Failed to update snippet');
-          }
-        }
-      } else {
-        const response = await fetch('/api/snippets', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ files })
-        });
-        const data = await response.json();
-        if (response.ok && data.id) {
-          setCurrentSnippetId(data.id);
-          window.history.replaceState(null, '', `/${data.id}`);
-          if (!isAuto) {
-            showToast('Snippet saved');
-            setIsReadOnly(true);
-          }
-        } else {
-          if (!isAuto) showToast('Failed to save snippet');
-        }
-      }
-    } catch (err) {
-      if (!isAuto) showToast('Error saving snippet');
-      console.error(err);
-    } finally {
-      if (!isAuto) setIsSaving(false);
+      const data = await response.json();
+      if (data && typeof data.error === 'string') return data.error;
+    } catch {
+      // Fall through to the status-based message.
     }
+    if (response.status === 413) return 'Snippet is too large to save';
+    return `Save failed (${response.status})`;
   };
+
+  const runSave = React.useCallback(async (auto: boolean) => {
+    if (isReadOnly) return;
+
+    if (isSavingRef.current) {
+      resavePendingRef.current = true;
+      return;
+    }
+
+    isSavingRef.current = true;
+    const revision = revisionRef.current;
+    const payload = JSON.stringify({ files: filesRef.current });
+    const existingId = snippetIdRef.current;
+    setSaveState({ status: 'saving' });
+
+    try {
+      const response = existingId
+        ? await fetch(`/api/snippets/${existingId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+          })
+        : await fetch('/api/snippets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+          });
+
+      if (!response.ok) {
+        setSaveState({ status: 'error', message: await readErrorMessage(response) });
+        return;
+      }
+
+      if (!existingId) {
+        const data = await response.json();
+        if (!data?.id) {
+          setSaveState({ status: 'error', message: 'Server did not return a snippet link' });
+          return;
+        }
+        snippetIdRef.current = data.id;
+        setCurrentSnippetId(data.id);
+        window.history.replaceState(null, '', `/${data.id}`);
+      }
+
+      savedRevisionRef.current = revision;
+      // More edits landed while the request was in flight.
+      setSaveState(revisionRef.current > revision ? { status: 'unsaved' } : { status: 'saved' });
+
+      if (!auto) {
+        showToast(existingId ? 'Snippet updated' : 'Snippet saved');
+        setIsReadOnly(true);
+      }
+    } catch (error) {
+      console.error('Save error:', error);
+      setSaveState({
+        status: 'error',
+        message: typeof navigator !== 'undefined' && !navigator.onLine
+          ? 'Offline — changes are kept in this tab'
+          : 'Could not reach the server',
+      });
+    } finally {
+      isSavingRef.current = false;
+      if (resavePendingRef.current) {
+        resavePendingRef.current = false;
+        void runSaveRef.current(true);
+      }
+    }
+  }, [isReadOnly]);
+
+  runSaveRef.current = runSave;
 
   const isFirstRender = React.useRef(true);
   React.useEffect(() => {
+    filesRef.current = files;
+
     if (isFirstRender.current) {
       isFirstRender.current = false;
       return;
     }
-    if (isReadOnly || !currentSnippetId) return;
-    const timer = setTimeout(() => {
-      handleSave(true);
-    }, 1000);
+
+    revisionRef.current += 1;
+    if (isReadOnly) return;
+
+    setSaveState({ status: 'unsaved' });
+
+    // Unsaved drafts have no URL to PATCH yet; the Save button creates one.
+    if (!snippetIdRef.current) return;
+
+    const timer = setTimeout(() => { void runSaveRef.current(true); }, 1000);
     return () => clearTimeout(timer);
-  }, [files]);
+  }, [files, isReadOnly]);
+
+  // Guard against losing work on reload while anything is pending.
+  React.useEffect(() => {
+    const atRisk = saveState.status === 'unsaved'
+      || saveState.status === 'saving'
+      || saveState.status === 'error';
+    if (!atRisk) return;
+
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [saveState.status]);
+
+  // Soft wrap is a per-reader preference, so it lives in localStorage rather
+  // than in the snippet. Read after mount to keep SSR markup stable.
+  React.useEffect(() => {
+    try {
+      setSoftWrap(window.localStorage.getItem('teter:soft-wrap') === '1');
+    } catch {
+      // Storage unavailable (private mode); the default is fine.
+    }
+  }, []);
+
+  const toggleSoftWrap = () => {
+    setSoftWrap(prev => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('teter:soft-wrap', next ? '1' : '0');
+      } catch {
+        // Preference just won't persist.
+      }
+      return next;
+    });
+  };
 
   const handleCopyCode = () => {
     if (activeFile?.encoding === 'base64') {
@@ -881,6 +986,21 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           </div>
 
           <div className="header-actions">
+            <SaveStatus
+              state={saveState}
+              autoSaves={Boolean(currentSnippetId)}
+              onRetry={() => void runSave(true)}
+            />
+
+            <button
+              className={`btn btn-icon ${softWrap ? 'is-active' : ''}`}
+              onClick={toggleSoftWrap}
+              aria-pressed={softWrap}
+              title={softWrap ? 'Soft wrap on — click to scroll long lines' : 'Soft wrap off — click to wrap long lines'}
+            >
+              <WrapText size={16} />
+            </button>
+
             <button
               className="btn btn-outline"
               onClick={handleCopyCode}
@@ -910,9 +1030,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
             )}
 
             {!isReadOnly && (
-              <button className="btn btn-primary" onClick={() => handleSave(false)} disabled={isSaving}>
+              <button
+                className="btn btn-primary"
+                onClick={() => void runSave(false)}
+                disabled={saveState.status === 'saving'}
+              >
                 <Save size={14} />
-                {isSaving ? 'Saving...' : 'Save'}
+                {saveState.status === 'saving' ? 'Saving…' : 'Save'}
               </button>
             )}
           </div>
@@ -933,13 +1057,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                 </button>
               </div>
             ) : activeFile ? (
-              <textarea
-                className="code-textarea"
+              <CodeEditor
+                key={activeFile.id}
                 value={activeFile.content}
-                onChange={handleContentChange}
+                fileName={activeFile.name}
                 readOnly={isReadOnly}
-                placeholder="Paste your code here..."
-                spellCheck={false}
+                wrap={softWrap}
+                onChange={handleContentChange}
               />
             ) : (
               <div className="hero-message">
