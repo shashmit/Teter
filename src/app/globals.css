@@ -183,6 +183,19 @@ body {
 .menu-panel.align-right { right: 0; }
 .menu-panel.align-left { left: 0; }
 
+/*
+ * Escapes clipping ancestors (the file list scrolls). Every offset is reset to
+ * auto so the measured `top`/`left` set in JS are the only ones in play -- a
+ * leftover stylesheet `top` alongside a JS `bottom` would stretch the panel.
+ */
+.menu-panel.is-fixed {
+  position: fixed;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  left: auto;
+}
+
 .menu-item {
   display: flex;
   align-items: center;
@@ -1107,50 +1120,22 @@ body {
   flex-shrink: 0;
 }
 
-.action-menu-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+/*
+ * Row overflow trigger: hidden until the row is hovered, but always exposed to
+ * keyboard users via :focus-visible and while its menu is open.
+ */
+.tree-menu-trigger {
   width: 24px;
   height: 24px;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  border: none;
   color: var(--text-muted);
-  cursor: pointer;
-  padding: 0;
   opacity: 0;
-  transition: all var(--transition);
 }
 
-.tree-view summary:hover .action-menu-btn,
-.file-item:hover .action-menu-btn {
+.tree-view summary:hover .tree-menu-trigger,
+.file-item:hover .tree-menu-trigger,
+.tree-menu-trigger:focus-visible,
+.tree-menu-trigger.is-active {
   opacity: 1;
-}
-
-.action-menu-btn:hover {
-  background: var(--surface-hover);
-  color: var(--text-primary);
-}
-
-.action-menu-btn.hover-danger:hover {
-  background: #FDF2F2;
-  color: #C0392B;
-}
-
-/* Dropdown Menu */
-.item-dropdown-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 50;
-  min-width: 180px;
-  padding: 6px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  animation: dropdown-fade-in 150ms ease;
 }
 
 @keyframes dropdown-fade-in {
@@ -1162,38 +1147,6 @@ body {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
-}
-
-.item-dropdown-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-align: left;
-  transition: all 120ms ease;
-  width: 100%;
-  font-weight: 500;
-  font-family: inherit;
-}
-
-.item-dropdown-item:hover {
-  color: var(--text-primary);
-  background: var(--surface-hover);
-}
-
-.item-dropdown-item.danger {
-  color: #EF4444;
-}
-
-.item-dropdown-item.danger:hover {
-  background: rgba(239, 68, 68, 0.08);
-  color: #DC2626;
 }
 
 /* Modal */

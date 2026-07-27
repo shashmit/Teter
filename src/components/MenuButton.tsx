@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 
 export interface MenuAction {
   label: string;
@@ -18,6 +18,14 @@ interface MenuButtonProps {
   disabled?: boolean;
   /** Anchors the menu to the button's right edge instead of its left. */
   align?: 'left' | 'right';
+  /**
+   * Use `fixed` inside a scrolling/clipping ancestor, where an absolutely
+   * positioned panel would be cut off. Fixed panels close on scroll rather than
+   * chasing the anchor.
+   */
+  strategy?: 'absolute' | 'fixed';
+  /** Extra classes for the trigger, e.g. to reveal it only on row hover. */
+  triggerClassName?: string;
 }
 
 /**
@@ -33,11 +41,14 @@ export default function MenuButton({
   actions,
   disabled = false,
   align = 'right',
+  strategy = 'absolute',
+  triggerClassName = '',
 }: MenuButtonProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const menuId = useId();
 
@@ -70,10 +81,68 @@ export default function MenuButton({
     };
   }, [isOpen, close]);
 
-  // Move focus onto the active item so arrow keys and Escape work immediately.
+  /*
+   * Move focus onto the active item so arrow keys and Escape work immediately.
+   * `preventScroll` matters: inside a scrolling list, focus would scroll the row
+   * into view and shift the trigger out from under the just-positioned panel.
+   */
   useEffect(() => {
-    if (isOpen) itemRefs.current[activeIndex]?.focus();
+    if (isOpen) itemRefs.current[activeIndex]?.focus({ preventScroll: true });
   }, [isOpen, activeIndex]);
+
+  /*
+   * Fixed panels are positioned from the trigger's viewport rect. Written
+   * straight to the node rather than through state: this is a measure-then-place
+   * pass, and useLayoutEffect runs before paint so nothing flashes.
+   */
+  useLayoutEffect(() => {
+    if (!isOpen || strategy !== 'fixed') return;
+
+    const panel = panelRef.current;
+    const trigger = triggerRef.current?.getBoundingClientRect();
+    if (!panel || !trigger) return;
+
+    /*
+     * Park at the origin before measuring. The panel is shrink-to-fit, so its
+     * width depends on the space available where it currently sits; measured at
+     * its static position it can report `min-width` and then grow once moved.
+     */
+    panel.style.top = '0px';
+    panel.style.left = '0px';
+    const { offsetWidth: panelWidth, offsetHeight: panelHeight } = panel;
+    const margin = 8;
+
+    /*
+     * Only `top` and `left` are ever assigned. Setting `bottom` to flip upward
+     * would leave the stylesheet's `top` in force too, and an element with both
+     * set stretches between them instead of sizing to its content.
+     */
+    let top = trigger.bottom + 4;
+    if (top + panelHeight + margin > window.innerHeight) {
+      const above = trigger.top - panelHeight - 4;
+      top = above >= margin ? above : Math.max(margin, window.innerHeight - panelHeight - margin);
+    }
+
+    let left = align === 'right' ? trigger.right - panelWidth : trigger.left;
+    left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - panelWidth - margin));
+
+    panel.style.top = `${top}px`;
+    panel.style.left = `${left}px`;
+    panel.style.visibility = 'visible';
+  }, [isOpen, strategy, align]);
+
+  // The anchor moves with its scroll container, so dismiss instead of chasing.
+  useEffect(() => {
+    if (!isOpen || strategy !== 'fixed') return;
+
+    const dismiss = () => close(false);
+    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', dismiss);
+    return () => {
+      window.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', dismiss);
+    };
+  }, [isOpen, strategy, close]);
 
   const step = (delta: number) => {
     setActiveIndex(prev => (prev + delta + actions.length) % actions.length);
@@ -127,7 +196,7 @@ export default function MenuButton({
       <button
         ref={triggerRef}
         type="button"
-        className={`btn btn-icon ${isOpen ? 'is-active' : ''}`}
+        className={`btn btn-icon ${triggerClassName} ${isOpen ? 'is-active' : ''}`}
         onClick={() => (isOpen ? close(false) : open(0))}
         onKeyDown={onTriggerKeyDown}
         disabled={disabled}
@@ -142,10 +211,12 @@ export default function MenuButton({
 
       {isOpen && (
         <div
+          ref={panelRef}
           id={menuId}
           role="menu"
           aria-label={label}
-          className={`menu-panel align-${align}`}
+          className={`menu-panel align-${align} ${strategy === 'fixed' ? 'is-fixed' : ''}`}
+          style={strategy === 'fixed' ? { visibility: 'hidden' } : undefined}
           onKeyDown={onMenuKeyDown}
         >
           {actions.map((action, index) => (
