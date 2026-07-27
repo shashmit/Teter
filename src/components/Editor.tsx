@@ -21,10 +21,14 @@ import {
   Download,
   MoreVertical,
   WrapText,
+  Plus,
+  Upload,
 } from 'lucide-react';
 
 import CodeEditor from '@/components/CodeEditor';
+import MenuButton, { type MenuAction } from '@/components/MenuButton';
 import SaveStatus, { type SaveState } from '@/components/SaveStatus';
+import { flattenDropEntries, readDropEntries } from '@/lib/drop-files';
 import { createZip, downloadBlob } from '@/lib/zip';
 import {
   createFileBlob,
@@ -94,24 +98,15 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     initialSnippetId ? { status: 'saved' } : { status: 'idle' }
   );
   const [softWrap, setSoftWrap] = useState(false);
+  const [isRootDropActive, setIsRootDropActive] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']));
   const [pendingUploadPath, setPendingUploadPath] = useState('');
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [editingFolderPath, setEditingFolderPath] = useState<string | null>(null);
   const [folderRenameValue, setFolderRenameValue] = useState<string>('');
-  const [activeMenuPath, setActiveMenuPath] = useState<string | null>(null);
   const folderInputRef = React.useRef<HTMLInputElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-
-  // Close dropdown menus on outside click
-  React.useEffect(() => {
-    const handleOutsideClick = () => {
-      setActiveMenuPath(null);
-    };
-    window.addEventListener('click', handleOutsideClick);
-    return () => window.removeEventListener('click', handleOutsideClick);
-  }, []);
 
   const activeFile = files.find(f => f.id === activeFileId);
   const tree = useMemo(() => buildTree(files), [files]);
@@ -124,6 +119,10 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
   };
+
+  /** Distinguishes an OS file drag from an internal file/folder move. */
+  const dragCarriesFiles = (dataTransfer: DataTransfer) =>
+    Array.from(dataTransfer.types).includes('Files');
 
   const expandPath = (path: string, target: Set<string>) => {
     if (!path) return;
@@ -333,10 +332,25 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     e.stopPropagation();
     if (isReadOnly) return;
     try {
+      // Read entries synchronously: DataTransfer is neutered after this handler
+      // returns, and only the entries API can describe dropped directories.
+      const droppedEntries = readDropEntries(e.dataTransfer);
+      if (droppedEntries.length > 0) {
+        void flattenDropEntries(droppedEntries)
+          .then(dropped => uploadFilesAtPath(dropped, targetPath))
+          .catch(error => {
+            console.error('Drop error:', error);
+            showToast('Could not read the dropped items');
+          });
+        return;
+      }
+
+      // Browsers without the entries API still hand over plain files.
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
         void uploadFilesAtPath(e.dataTransfer.files, targetPath);
         return;
       }
+
       const dataStr = e.dataTransfer.getData('text/plain');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
@@ -430,8 +444,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
   };
 
-  const handleDeleteFile = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
+  const handleDeleteFile = (id: string) => {
     if (isReadOnly) return;
     if (files.length === 1) {
       showToast('Cannot delete the last file.');
@@ -484,9 +497,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     return `Save failed (${response.status})`;
   };
 
+  /*
+   * Deliberately not gated on `isReadOnly`. Auto-saves are already suppressed in
+   * view mode by the effect below, and the Save button only renders while
+   * editing. Blocking here instead would strand a failed save's changes the
+   * moment the user switched to view mode, leaving an inert Retry button.
+   */
   const runSave = React.useCallback(async (auto: boolean) => {
-    if (isReadOnly) return;
-
     if (isSavingRef.current) {
       resavePendingRef.current = true;
       return;
@@ -550,7 +567,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         void runSaveRef.current(true);
       }
     }
-  }, [isReadOnly]);
+  }, []);
 
   runSaveRef.current = runSave;
 
@@ -645,63 +662,29 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     setExpandedFolders(newExpanded);
   };
 
-  // Dynamic action rendering: <2 options = direct button, >=2 options = three-dot menu
-  interface ActionOption {
-    label: string;
-    icon: React.ReactNode;
-    onClick: (e: React.MouseEvent) => void;
-    danger?: boolean;
-  }
+  /*
+   * Every tree row gets the same single overflow menu, whether it is a file or a
+   * folder and however many actions it has. Previously a one-action row rendered
+   * a bare icon button while a multi-action row rendered a three-dot menu, so
+   * the same gesture did different things depending on the row and mode.
+   *
+   * `fixed` positioning is required here: the file list is a scroll container,
+   * and the old absolutely positioned dropdown was clipped for rows near the
+   * bottom of the sidebar.
+   */
+  const renderItemActions = (actions: MenuAction[], label: string) => {
+    if (actions.length === 0) return null;
 
-  const renderItemActions = (options: ActionOption[], pathOrId: string) => {
-    if (options.length === 0) return null;
-
-    // Less than 2 options: show button directly
-    if (options.length < 2) {
-      const opt = options[0];
-      return (
-        <div className="item-actions-wrapper" onClick={(e) => e.stopPropagation()}>
-          <button
-            className={`action-menu-btn ${opt.danger ? 'hover-danger' : ''}`}
-            onClick={opt.onClick}
-            title={opt.label}
-          >
-            {opt.icon}
-          </button>
-        </div>
-      );
-    }
-
-    // 2 or more options: show three-dot dropdown menu
     return (
       <div className="item-actions-wrapper" onClick={(e) => e.stopPropagation()}>
-        <button
-          className="action-menu-btn"
-          onClick={(e) => {
-            e.stopPropagation();
-            setActiveMenuPath(prev => prev === pathOrId ? null : pathOrId);
-          }}
-          title="Actions"
-        >
-          <MoreVertical size={14} />
-        </button>
-        {activeMenuPath === pathOrId && (
-          <div className="item-dropdown-menu" onClick={(e) => e.stopPropagation()}>
-            {options.map((opt, idx) => (
-              <button
-                key={idx}
-                className={`item-dropdown-item ${opt.danger ? 'danger' : ''}`}
-                onClick={(e) => {
-                  setActiveMenuPath(null);
-                  opt.onClick(e);
-                }}
-              >
-                {opt.icon}
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        )}
+        <MenuButton
+          icon={<MoreVertical size={14} />}
+          label={label}
+          actions={actions}
+          align="right"
+          strategy="fixed"
+          triggerClassName="tree-menu-trigger"
+        />
       </div>
     );
   };
@@ -716,51 +699,51 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         if (child.type === 'folder') {
           const isExpanded = expandedFolders.has(child.path);
 
-          const folderOptions: ActionOption[] = isReadOnly ? [
+          const folderOptions: MenuAction[] = isReadOnly ? [
             {
-              label: 'Download Folder',
+              label: 'Download folder',
               icon: <Download size={14} />,
-              onClick: () => handleFolderDownload(child.path)
+              onSelect: () => handleFolderDownload(child.path)
             }
           ] : [
             {
-              label: 'New File',
+              label: 'New file',
               icon: <FilePlus size={14} />,
-              onClick: () => handleAddFile(child.path)
+              onSelect: () => handleAddFile(child.path)
             },
             {
-              label: 'New Folder',
+              label: 'New folder',
               icon: <FolderPlus size={14} />,
-              onClick: () => handleAddFolder(child.path)
+              onSelect: () => handleAddFolder(child.path)
             },
             {
-              label: 'Upload Files',
+              label: 'Upload files',
               icon: <FileUp size={14} />,
-              onClick: () => handleFileUploadClick(child.path)
+              onSelect: () => handleFileUploadClick(child.path)
             },
             {
-              label: 'Upload Folder',
+              label: 'Upload folder',
               icon: <FolderUp size={14} />,
-              onClick: () => handleFolderUploadClick(child.path)
+              onSelect: () => handleFolderUploadClick(child.path)
             },
             {
-              label: 'Download Folder',
+              label: 'Download folder',
               icon: <Download size={14} />,
-              onClick: () => handleFolderDownload(child.path)
+              onSelect: () => handleFolderDownload(child.path)
             },
             {
-              label: 'Rename Folder',
+              label: 'Rename folder',
               icon: <Pencil size={14} />,
-              onClick: () => {
+              onSelect: () => {
                 setEditingFolderPath(child.path);
                 setFolderRenameValue(child.name);
               }
             },
             {
-              label: 'Delete Folder',
+              label: 'Delete folder',
               icon: <Trash2 size={14} />,
               danger: true,
-              onClick: () => {
+              onSelect: () => {
                 if (confirm(`Are you sure you want to delete the folder "${child.name}" and all of its contents?`)) {
                   handleFolderDelete(child.path);
                 }
@@ -817,7 +800,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                 ) : (
                   <span style={{ flex: 1 }}>{child.name}</span>
                 )}
-                {renderItemActions(folderOptions, child.path)}
+                {renderItemActions(folderOptions, `Actions for folder ${child.name}`)}
               </summary>
               <ul>
                 {renderTreeNodes(child, depth + 1)}
@@ -828,19 +811,19 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           const isActive = activeFileId === child.id;
 
           const selectedFile = files.find(file => file.id === child.id);
-          const fileOptions: ActionOption[] = [
+          const fileOptions: MenuAction[] = [
             {
               label: 'Download file',
-              icon: <Download size={13} />,
-              onClick: () => {
+              icon: <Download size={14} />,
+              onSelect: () => {
                 if (selectedFile) handleFileDownload(selectedFile);
               }
             },
             ...(!isReadOnly ? [{
               label: 'Delete file',
-              icon: <Trash2 size={13} />,
+              icon: <Trash2 size={14} />,
               danger: true,
-              onClick: (e: React.MouseEvent) => handleDeleteFile(e, child.id!)
+              onSelect: () => handleDeleteFile(child.id!)
             }] : [])
           ];
 
@@ -895,7 +878,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                     placeholder="filename"
                   />
                 )}
-                {renderItemActions(fileOptions, child.path)}
+                {renderItemActions(fileOptions, `Actions for ${child.name}`)}
               </div>
             </li>
           );
@@ -915,34 +898,77 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
             <div className="sidebar-actions">
-              <button className="btn btn-icon" onClick={() => handleFileUploadClick('')} title="Upload files">
-                <FileUp size={16} />
-              </button>
-              <button className="btn btn-icon" onClick={() => handleFolderUploadClick('')} title="Upload folder">
-                <FolderUp size={16} />
-              </button>
-              <button className="btn btn-icon" onClick={() => handleAddFile('')} title="New file">
-                <FilePlus size={16} />
-              </button>
-              <button className="btn btn-icon" onClick={() => handleAddFolder('')} title="New folder">
-                <FolderPlus size={16} />
-              </button>
+              <MenuButton
+                icon={<Upload size={16} />}
+                label="Upload"
+                actions={[
+                  {
+                    label: 'Upload files',
+                    icon: <FileUp size={14} />,
+                    hint: 'One or many',
+                    onSelect: () => handleFileUploadClick(''),
+                  },
+                  {
+                    label: 'Upload folder',
+                    icon: <FolderUp size={14} />,
+                    hint: 'Keeps structure',
+                    onSelect: () => handleFolderUploadClick(''),
+                  },
+                ]}
+              />
+              <MenuButton
+                icon={<Plus size={17} />}
+                label="Create"
+                actions={[
+                  {
+                    label: 'New file',
+                    icon: <FilePlus size={14} />,
+                    onSelect: () => handleAddFile(''),
+                  },
+                  {
+                    label: 'New folder',
+                    icon: <FolderPlus size={14} />,
+                    onSelect: () => handleAddFolder(''),
+                  },
+                ]}
+              />
             </div>
           )}
         </div>
 
-        <div className="file-list-container">
-          <ul
-            className="tree-view"
-            onDragOver={handleDragOver}
-            onDrop={(e) => {
-              if (e.target === e.currentTarget) {
-                handleDrop(e, '');
-              }
-            }}
-          >
+        {/*
+          The whole list is the root drop target. Child folders call
+          stopPropagation in handleDrop, so this only handles drops that land on
+          empty space — previously that was just the bare <ul>, a sliver.
+        */}
+        <div
+          className={`file-list-container ${isRootDropActive ? 'is-drop-target' : ''}`}
+          onDragOver={(e) => {
+            handleDragOver(e);
+            if (!isReadOnly && dragCarriesFiles(e.dataTransfer)) {
+              e.dataTransfer.dropEffect = 'copy';
+              setIsRootDropActive(true);
+            }
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              setIsRootDropActive(false);
+            }
+          }}
+          onDrop={(e) => {
+            setIsRootDropActive(false);
+            handleDrop(e, '');
+          }}
+        >
+          <ul className="tree-view">
             {renderTreeNodes(tree)}
           </ul>
+
+          {!isReadOnly && (
+            <p className="drop-hint" aria-hidden="true">
+              Drop files or folders here
+            </p>
+          )}
         </div>
 
         {/* Delete Project button in sidebar footer */}

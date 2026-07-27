@@ -16,16 +16,6 @@ const BINARY_EXTENSIONS = new Set([
   'zip',
 ]);
 
-const TEXT_APPLICATION_TYPES = new Set([
-  'application/javascript',
-  'application/json',
-  'application/ld+json',
-  'application/sql',
-  'application/typescript',
-  'application/x-httpd-php',
-  'application/xml',
-]);
-
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunkSize = 0x8000;
@@ -52,19 +42,22 @@ function isLikelyBinary(file: File, bytes: Uint8Array): boolean {
   const extension = file.name.split('.').pop()?.toLowerCase();
   if (extension && BINARY_EXTENSIONS.has(extension)) return true;
 
-  if (
-    file.type &&
-    !file.type.startsWith('text/') &&
-    !TEXT_APPLICATION_TYPES.has(file.type)
-  ) {
-    return true;
-  }
-
+  /*
+   * `file.type` is deliberately NOT consulted to declare a file binary.
+   * Browsers report plain source files with non-text MIME types -- .ts as
+   * video/mp2t (MPEG transport stream), .svg as image/svg+xml, .yaml as
+   * application/x-yaml, .sh as application/x-sh -- so trusting it turned
+   * ordinary code into unreadable base64 on folder upload. Sniffing the actual
+   * bytes is both authoritative and extension-agnostic.
+   */
   const sample = bytes.subarray(0, Math.min(bytes.length, 8192));
   if (sample.includes(0)) return true;
 
   try {
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(sample);
+    // `stream: true` buffers a multi-byte character split by the 8 KB sample
+    // boundary instead of throwing, which would misreport large text as binary.
+    const decoded = new TextDecoder('utf-8', { fatal: true })
+      .decode(sample, { stream: true });
     let controlCharacters = 0;
 
     for (const character of decoded) {
