@@ -898,9 +898,15 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
             <div className="sidebar-actions">
+              {/*
+                Fixed, not absolute: the sidebar is `overflow: hidden`, and these
+                panels are wider than the space left of their trigger, so an
+                absolute panel gets its left edge clipped off.
+              */}
               <MenuButton
                 icon={<Upload size={16} />}
                 label="Upload"
+                strategy="fixed"
                 actions={[
                   {
                     label: 'Upload files',
@@ -919,6 +925,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
               <MenuButton
                 icon={<Plus size={17} />}
                 label="Create"
+                strategy="fixed"
                 actions={[
                   {
                     label: 'New file',
