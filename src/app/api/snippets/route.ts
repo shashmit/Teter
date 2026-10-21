@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { ConvexHttpClient } from "convex/browser";
+import { ConvexError } from "convex/values";
 
 interface CodeFilePayload {
     id: string;
@@ -10,6 +11,13 @@ interface CodeFilePayload {
     mimeType?: string;
     size?: number;
 }
+
+/**
+ * Mirrors the landing page's check. It has to live here too: a client-only
+ * check let ids like `a/b` or `x?y` through, creating snippets whose URL
+ * could never resolve to them.
+ */
+const SHORT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 function generateShortId(length = 7) {
     return crypto.randomBytes(length).toString('base64url').substring(0, length);
@@ -33,13 +41,18 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: 'Files are required' }, { status: 400 });
         }
 
-        const shortId = requestedShortId ? requestedShortId.slice(0, 64) : generateShortId();
+        // Empty or null still means "generate one", as before.
+        if (requestedShortId != null && requestedShortId !== '' && (typeof requestedShortId !== 'string' || !SHORT_ID_PATTERN.test(requestedShortId))) {
+            return NextResponse.json({ error: 'Site ID may only use letters, numbers, hyphens and underscores (max 64)' }, { status: 400 });
+        }
+
+        const shortId = requestedShortId || generateShortId();
         await convexMutations.mutation("snippets:create", { shortId, files, title: title || undefined });
 
-        return NextResponse.json({ id: shortId, title, files }, { status: 201 });
+        return NextResponse.json({ id: shortId, title }, { status: 201 });
     } catch (error) {
         console.error('Failed to save snippet:', error);
-        if (error instanceof Error && error.message.includes('already exists')) {
+        if (error instanceof ConvexError && (error.data as { code?: string } | undefined)?.code === 'already_exists') {
             return NextResponse.json({ error: 'Snippet ID already exists' }, { status: 409 });
         }
         return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });

@@ -4,6 +4,9 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { RefreshCcw, ArrowRight, Loader2, Code2 } from 'lucide-react';
 
+/** Same source as layout.tsx's canonical URL, so the preview shows the real address. */
+const SITE_HOST = new URL(process.env.NEXT_PUBLIC_SITE_URL || 'https://teter.vercel.app').host;
+
 export default function Landing() {
   const router = useRouter();
   const [siteId, setSiteId] = useState('');
@@ -108,7 +111,7 @@ export default function Landing() {
           <form onSubmit={handleCheck} className="landing-form">
             <label htmlFor="siteId" className="form-label">Create or Join a Site</label>
             <div className="input-group">
-              <span className="url-prefix">teter.app/</span>
+              <span className="url-prefix">{SITE_HOST}/</span>
               <input
                 id="siteId"
                 type="text"
@@ -133,6 +136,10 @@ export default function Landing() {
                 <RefreshCcw size={16} />
               </button>
             </div>
+            {/* Phones hide the inline prefix to leave room to type; show the full URL here instead. */}
+            <p className="url-preview" aria-live="polite">
+              {SITE_HOST}/<span>{siteId || 'your-site'}</span>
+            </p>
             
             {error && <div className="error-message">{error}</div>}
             

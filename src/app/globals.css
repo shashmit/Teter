@@ -27,6 +27,13 @@
   --border-light: #EDE7E0;
 
   --danger: #C0392B;
+
+  /* Dark window chrome behind the tab strip; warm, to sit with the browns. */
+  --chrome-top: #35281F;
+  --chrome-bottom: #241B15;
+  --chrome-text: rgba(250, 247, 244, 0.62);
+  --chrome-text-strong: #FAF7F4;
+  --chrome-hover: rgba(250, 247, 244, 0.08);
   --danger-surface: rgba(192, 57, 43, 0.08);
 
   /*
@@ -37,6 +44,8 @@
    * z-index, which is what `strategy="fixed"` on MenuButton exists to solve.
    */
   --z-sticky: 1;
+  /* Below the toast: actions taken inside the phone drawer report via toasts. */
+  --z-drawer: 50;
   --z-toast: 100;
   --z-dropdown: 200;
   --z-modal: 300;
@@ -52,6 +61,18 @@
   --radius-xl: 20px;
 
   --transition: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  /*
+   * Never `transition: all`: it includes `visibility`, which holds a newly
+   * shown element at `hidden` for its first frame. That silently broke
+   * focus-on-open for every menu, so Escape and arrow keys never worked.
+   */
+  --interactive-transition:
+    background-color var(--transition),
+    color var(--transition),
+    border-color var(--transition),
+    box-shadow var(--transition),
+    opacity var(--transition),
+    transform var(--transition);
 }
 
 * {
@@ -92,6 +113,8 @@ body {
 .app-container {
   display: flex;
   height: 100vh;
+  /* Mobile browser chrome shrinks the visible viewport; vh ignores that. */
+  height: 100dvh;
   max-width: 1440px;
   margin: 0 auto;
   padding: 16px;
@@ -223,7 +246,7 @@ body {
   font-weight: 500;
   text-align: left;
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .menu-item:hover,
@@ -316,7 +339,7 @@ body {
   padding: 6px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: var(--interactive-transition);
   font-size: 13px;
   color: var(--text-secondary);
   gap: 8px;
@@ -354,7 +377,7 @@ body {
   cursor: pointer;
   font-family: inherit;
   font-weight: 500;
-  transition: all var(--transition);
+  transition: var(--interactive-transition);
   white-space: nowrap;
   outline: none;
 }
@@ -469,42 +492,119 @@ body {
   border: 1px solid var(--border-light);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
+  /*
+   * `clip` also forbids programmatic scrolling. With plain `hidden`, focusing a
+   * toolbar button that overflowed scrolled the whole pane sideways, cutting
+   * off the code and its line numbers.
+   */
+  overflow: clip;
   min-width: 0;
 }
 
 /* Top Bar */
-.top-bar {
+/*
+ * Header: a dark tab strip over the white toolbar. The active tab is white
+ * and runs into the toolbar, so the editor reads as the window that tab opens.
+ */
+.tab-strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  min-height: 46px;
+  padding: 8px 12px 0;
+  background: linear-gradient(180deg, var(--chrome-top) 0%, var(--chrome-bottom) 100%);
+}
+
+/*
+ * The white content of each panel sits inset in the dark chrome with curved
+ * top corners, so the chrome reads as a frame around a sheet.
+ */
+.sidebar,
+.main-area {
+  background: var(--chrome-bottom);
+  border-color: var(--chrome-bottom);
+}
+
+.sidebar-body,
+.window-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  overflow: hidden;
+  overflow: clip;
+}
+
+.toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border-light);
-  background: var(--bg-elevated);
   gap: 12px;
   min-height: 52px;
+  padding: 8px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-light);
+}
+
+/* Where the active file lives; the tab only shows its name. */
+.toolbar-path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.toolbar-path span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar-path svg {
+  flex-shrink: 0;
+}
+
+.toolbar-path .is-current {
+  color: var(--text-secondary);
+  font-weight: 500;
 }
 
 /* Tabs */
 .tab-list {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
+  align-self: stretch;
   gap: 2px;
   flex: 1;
+  /* Lets the tabs scroll instead of pushing the actions off-screen. */
+  min-width: 0;
   overflow-x: auto;
-  padding: 2px;
+  /* Room for the active tab's flared corners at either end. */
+  padding: 0 8px;
+  scrollbar-width: none;
+}
+
+.tab-list::-webkit-scrollbar {
+  display: none;
 }
 
 .tab-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  border-radius: 8px 8px 0 0;
   font-size: 13px;
   font-weight: 400;
-  color: var(--text-secondary);
+  color: var(--chrome-text);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: var(--interactive-transition);
   white-space: nowrap;
   border: none;
   background: none;
@@ -512,14 +612,35 @@ body {
 }
 
 .tab-item:hover {
-  background: var(--surface-hover);
-  color: var(--text-primary);
+  background: var(--chrome-hover);
+  color: var(--chrome-text-strong);
 }
 
 .tab-item.active {
-  background: var(--primary-surface);
+  background: var(--bg-elevated);
   color: var(--primary);
   font-weight: 500;
+}
+
+/* Concave corners where the active tab flares into the toolbar. */
+.tab-item.active::before,
+.tab-item.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+}
+
+.tab-item.active::before {
+  left: -8px;
+  background: radial-gradient(circle at 0 0, transparent 8px, var(--bg-elevated) 8.5px);
+}
+
+.tab-item.active::after {
+  right: -8px;
+  background: radial-gradient(circle at 100% 0, transparent 8px, var(--bg-elevated) 8.5px);
 }
 
 .tab-close {
@@ -535,7 +656,7 @@ body {
   cursor: pointer;
   font-size: 10px;
   opacity: 0;
-  transition: all var(--transition);
+  transition: var(--interactive-transition);
   padding: 0;
   font-family: inherit;
 }
@@ -547,14 +668,72 @@ body {
 
 .tab-close:hover {
   opacity: 1 !important;
+  background: var(--chrome-hover);
+  color: var(--chrome-text-strong);
+}
+
+.tab-item.active .tab-close:hover {
   background: rgba(192, 57, 43, 0.1);
   color: #C0392B;
+}
+
+.brand .sidebar-close {
+  color: var(--chrome-text);
+}
+
+.brand .sidebar-close:hover {
+  background: var(--chrome-hover);
+  color: var(--chrome-text-strong);
+}
+
+.tab-strip .sidebar-toggle {
+  align-self: center;
+  margin-bottom: 4px;
+  color: var(--chrome-text);
+}
+
+.tab-strip .sidebar-toggle:hover,
+.tab-strip .sidebar-toggle.is-active {
+  background: var(--chrome-hover);
+  color: var(--chrome-text-strong);
 }
 
 .header-actions {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 6px;
+  margin-left: auto;
+}
+
+/*
+ * Buttons keep their size; the save status is what gives way. A long error
+ * plus its Retry button used to squeeze the icon buttons into slivers and
+ * push Save off-screen.
+ */
+.header-actions > * {
+  flex-shrink: 0;
+}
+
+.header-actions > .save-status {
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.save-status-label {
+  min-width: 0;
+}
+
+.save-status-retry,
+.save-status > svg {
+  flex-shrink: 0;
+}
+
+/* Phone-only drawer controls; see the responsive section. */
+.sidebar-toggle,
+.sidebar-close,
+.sidebar-backdrop {
+  display: none;
 }
 
 /* Save status */
@@ -605,7 +784,7 @@ body {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: var(--interactive-transition);
 }
 
 .save-status-retry:hover {
@@ -813,23 +992,36 @@ body {
 }
 
 /* Toast */
+/*
+ * Floats bottom-centre on every device. Centred with auto margins rather than
+ * a -50% translate, so the entry animation's transform doesn't fight it. It
+ * sizes to its message and wraps rather than running off narrow screens.
+ */
 .toast {
   position: fixed;
-  bottom: 24px;
-  right: 24px;
+  left: 0;
+  right: 0;
+  bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px));
   z-index: var(--z-toast);
+  width: fit-content;
+  max-width: min(480px, calc(100vw - 32px));
+  margin-inline: auto;
   /* Purely informational, so it must never swallow clicks on what it covers. */
   pointer-events: none;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   padding: 12px 20px;
-  background: var(--text-primary);
-  color: var(--bg-primary);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-toast);
+  background: linear-gradient(180deg, var(--chrome-top) 0%, var(--chrome-bottom) 100%);
+  color: var(--chrome-text-strong);
+  border: 1px solid rgba(250, 247, 244, 0.08);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-toast), 0 2px 6px rgba(36, 27, 21, 0.18);
   font-size: 13px;
   font-weight: 500;
+  line-height: 1.4;
+  text-align: center;
   animation: toast-in 300ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -872,11 +1064,15 @@ body {
 }
 
 /* Brand */
+/* Same dark chrome and height as the tab strip, so both panels read as windows. */
 .brand {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 16px;
+  min-height: 46px;
+  padding: 0 12px 0 16px;
+  background: linear-gradient(180deg, var(--chrome-top) 0%, var(--chrome-bottom) 100%);
 }
 
 .brand-mark {
@@ -895,7 +1091,7 @@ body {
 .brand-name {
   font-size: 16px;
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--chrome-text-strong);
   letter-spacing: -0.3px;
 }
 
@@ -930,20 +1126,6 @@ body {
   }
 }
 
-/* Responsive */
-@media (max-width: 768px) {
-  .app-container {
-    flex-direction: column;
-    padding: 8px;
-    gap: 8px;
-  }
-
-  .sidebar {
-    width: 100%;
-    min-width: 0;
-    max-height: 200px;
-  }
-}
 
 /* Landing Page Styles */
 .landing-container {
@@ -1035,7 +1217,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 4px 8px;
-  transition: all var(--transition);
+  transition: var(--interactive-transition);
 }
 
 .input-group:focus-within {
@@ -1206,4 +1388,265 @@ body {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 8px;
+}
+
+/*
+ * Responsive and input-modality rules stay last so they win over the base
+ * rules above at equal specificity.
+ */
+/*
+ * Keyboard focus. `.btn` drops the default outline, which left keyboard users
+ * with no indication of where they were anywhere in the app.
+ */
+.btn:focus-visible,
+.tab-item:focus-visible,
+.file-item:focus-visible,
+.tree-view summary:focus-visible,
+.save-status-retry:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Maroon disappears on the dark strip. */
+.tab-strip .tab-item:focus-visible,
+.tab-strip .btn:focus-visible,
+.brand .btn:focus-visible {
+  outline-color: var(--chrome-text-strong);
+}
+
+/* Responsive */
+
+.url-preview {
+  display: none;
+  margin-top: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.url-preview span {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+@media (max-width: 1100px) {
+  .sidebar {
+    width: 240px;
+    min-width: 240px;
+  }
+}
+
+/* Phones: secondary toolbar buttons go icon-only so Save keeps its label. */
+@media (max-width: 768px) {
+  .header-actions .btn-outline {
+    width: 36px;
+    padding: 0;
+  }
+
+  .header-actions .btn-outline .btn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-container {
+    padding: 0;
+    gap: 0;
+  }
+
+  /*
+   * The file tree becomes a drawer. A 200px strip above the editor showed one
+   * or two rows and left the tree unusable. `transform: none` when open, not
+   * translateX(0): any transform makes the drawer the containing block for its
+   * fixed-position menus.
+   */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-drawer);
+    width: min(86vw, 320px);
+    min-width: 0;
+    border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform var(--transition), visibility 0s linear 180ms;
+  }
+
+  .sidebar.is-open {
+    transform: none;
+    visibility: visible;
+    transition: transform var(--transition);
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-drawer);
+    background: rgba(61, 43, 31, 0.32);
+    animation: fade-in 180ms ease;
+  }
+
+  .sidebar-toggle,
+  .sidebar-close {
+    display: inline-flex;
+  }
+
+  .main-area {
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+  }
+
+  .tab-strip {
+    padding: 6px 8px 0;
+    gap: 2px;
+  }
+
+  .toolbar {
+    padding: 6px 8px;
+  }
+
+  /* The status takes the path's place; the tab already names the file. */
+  .toolbar-path {
+    display: none;
+  }
+
+  .header-actions {
+    width: 100%;
+    gap: 4px;
+  }
+
+  .header-actions .save-status {
+    margin-right: auto;
+    padding-left: 4px;
+  }
+
+  .header-actions .btn-primary {
+    padding: 0 14px;
+  }
+
+  .code-surface {
+    --code-pad-x: 12px;
+    --code-pad-y: 12px;
+  }
+
+  .toast {
+    bottom: max(16px, calc(env(safe-area-inset-bottom) + 12px));
+    max-width: calc(100vw - 24px);
+    padding: 12px 18px;
+    font-size: 14px;
+  }
+
+  .modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .modal-actions .btn {
+    width: 100%;
+  }
+
+  .landing-card {
+    padding: 24px 20px;
+  }
+
+  .landing-logo h1 {
+    font-size: 28px;
+  }
+
+}
+
+/* Too narrow for the host and a usable field side by side. */
+@media (max-width: 480px) {
+  .url-prefix {
+    display: none;
+  }
+
+  .url-preview {
+    display: block;
+  }
+
+  /* No room for the message beside Retry; it stays in the tooltip and for screen readers. */
+  .save-status.is-error .save-status-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/*
+ * Touch screens. Hover-revealed controls are unreachable without a mouse, so
+ * they stay visible, and targets grow toward the 44px guideline.
+ */
+/* Either signal counts: some touch devices report coarse pointer but claim hover. */
+@media (hover: none), (pointer: coarse) {
+  .tree-menu-trigger,
+  .tab-item .tab-close {
+    opacity: 0.7;
+  }
+
+  .drop-hint {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .btn-icon,
+  .header-actions .btn-outline {
+    width: 40px;
+    height: 40px;
+  }
+
+  .btn-primary,
+  .btn-outline,
+  .btn-danger {
+    height: 40px;
+  }
+
+  .tree-menu-trigger {
+    width: 36px;
+    height: 36px;
+  }
+
+  .file-item,
+  .tree-view summary {
+    min-height: 44px;
+  }
+
+  .tab-item {
+    min-height: 36px;
+  }
+
+  .tab-close {
+    width: 28px;
+    height: 28px;
+    margin-right: -6px;
+  }
+
+  .menu-item {
+    min-height: 44px;
+  }
+
+  /* iOS zooms the page into any focused field under 16px. */
+  .site-input,
+  .file-name-input {
+    font-size: 16px;
+  }
+
+  .code-surface {
+    --code-font-size: 16px;
+    --code-line-height: 1.6;
+  }
 }
