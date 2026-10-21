@@ -23,6 +23,7 @@ import {
   WrapText,
   Plus,
   Upload,
+  PanelLeft,
 } from 'lucide-react';
 
 import CodeEditor from '@/components/CodeEditor';
@@ -62,14 +63,50 @@ interface TreeNode {
   children: Record<string, TreeNode>;
 }
 
+/**
+ * Small snippets open with every file in a tab. Past this, only the first file
+ * opens: hundreds of tabs are unusable and slow every render.
+ */
+const MAX_INITIAL_TABS = 8;
+
+/** Splits a file's last path segment into the editable stem and its extension. */
+function splitFileName(path: string) {
+  const baseName = path.split('/').pop() || '';
+  const dotIndex = baseName.lastIndexOf('.');
+  return dotIndex === -1
+    ? { stem: baseName, extension: '' }
+    : { stem: baseName.slice(0, dotIndex), extension: baseName.slice(dotIndex) };
+}
+
+/** Date.now() alone repeats within a millisecond, and ids must be unique. */
+const createFileId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+/** Whether `name` is the path `root` itself or anything nested under it. */
+const isWithin = (name: string, root: string) => name === root || name.startsWith(`${root}/`);
+
+/**
+ * Builds a save request body. Edits replace file objects rather than mutating
+ * them, so any object still identical to one the server acknowledged is
+ * unchanged and doesn't need resending; `fileIds` tells the server what to keep.
+ */
+function buildSaveBody(files: CodeFile[], savedFiles: CodeFile[] | null) {
+  if (!savedFiles) return { files };
+  const unchanged = new Set(savedFiles);
+  return {
+    files: files.filter(file => !unchanged.has(file)),
+    fileIds: files.map(file => file.id),
+  };
+}
+
 function buildTree(files: CodeFile[]) {
   const root: TreeNode = { name: 'root', path: '', type: 'folder', children: {} };
   files.forEach(file => {
     const parts = file.name.split('/');
     let current = root;
+    let path = '';
     parts.forEach((part, index) => {
       const isLast = index === parts.length - 1;
-      const path = parts.slice(0, index + 1).join('/');
+      path = path ? `${path}/${part}` : part;
       if (!current.children[part]) {
         current.children[part] = {
           name: part,
@@ -89,15 +126,29 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const router = useRouter();
   const [currentSnippetId, setCurrentSnippetId] = useState(initialSnippetId);
   const [isReadOnly, setIsReadOnly] = useState(initialReadOnly);
-  const [files, setFiles] = useState<CodeFile[]>(
-    initialFiles || [{ id: Date.now().toString(), name: 'main.txt', content: '' }]
-  );
+  const [files, setFiles] = useState<CodeFile[]>(() => {
+    if (!initialFiles) return [{ id: createFileId(), name: 'main.txt', content: '' }];
+    // Ids used to come from Date.now() and can repeat in stored snippets.
+    // Re-id repeats so tabs, edits and saves can address each file.
+    const seen = new Set<string>();
+    return initialFiles.map(file => {
+      if (!seen.has(file.id)) {
+        seen.add(file.id);
+        return file;
+      }
+      return { ...file, id: createFileId() };
+    });
+  });
   const [activeFileId, setActiveFileId] = useState<string>(files[0]?.id || '');
-  const [openTabIds, setOpenTabIds] = useState<string[]>(files.map(f => f.id));
+  const [openTabIds, setOpenTabIds] = useState<string[]>(() =>
+    (files.length <= MAX_INITIAL_TABS ? files : files.slice(0, 1)).map(f => f.id)
+  );
   const [saveState, setSaveState] = useState<SaveState>(
     initialSnippetId ? { status: 'saved' } : { status: 'idle' }
   );
   const [softWrap, setSoftWrap] = useState(false);
+  /** Phone-width only: the file tree becomes a drawer. Ignored on desktop. */
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRootDropActive, setIsRootDropActive] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['']));
@@ -105,11 +156,25 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [editingFolderPath, setEditingFolderPath] = useState<string | null>(null);
   const [folderRenameValue, setFolderRenameValue] = useState<string>('');
+  /** In-progress file rename; applied on Enter/blur so it can be checked first. */
+  const [fileRenameDraft, setFileRenameDraft] = useState<{ id: string; stem: string } | null>(null);
+  // Drop a draft whose input went away without blurring (active file or mode
+  // changed), so it can't resurface and commit later.
+  const draftContext = `${activeFileId}:${isReadOnly}`;
+  const [draftContextSeen, setDraftContextSeen] = useState(draftContext);
+  if (draftContextSeen !== draftContext) {
+    setDraftContextSeen(draftContext);
+    setFileRenameDraft(null);
+  }
   const folderInputRef = React.useRef<HTMLInputElement>(null);
+  const tabListRef = React.useRef<HTMLDivElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  const activeFile = files.find(f => f.id === activeFileId);
+  // The tree and tabs look files up by id per row; a scan each time is O(n²).
+  const filesById = useMemo(() => new Map(files.map(file => [file.id, file])), [files]);
+  const activeFile = filesById.get(activeFileId);
   const tree = useMemo(() => buildTree(files), [files]);
+  const toastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleDragStart = (e: React.DragEvent, id: string, type: 'file' | 'folder', path: string) => {
     if (isReadOnly) return;
@@ -160,7 +225,8 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     const selectedFiles = Array.from(uploadList);
     if (!selectedFiles.length) return;
     const existingPaths = new Set(files.map(file => file.name));
-    const nextExpanded = new Set(expandedFolders);
+    // Only the additions: reads are async, and the user may toggle folders meanwhile.
+    const nextExpanded = new Set<string>();
     expandPath(targetPath, nextExpanded);
     try {
       const uploadedFiles: CodeFile[] = await Promise.all(
@@ -189,7 +255,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         })
       );
       setFiles(prev => [...prev, ...uploadedFiles]);
-      setExpandedFolders(nextExpanded);
+      setExpandedFolders(prev => new Set([...prev, ...nextExpanded]));
       showToast(
         uploadedFiles.length === 1
           ? `Uploaded ${uploadedFiles[0].name.split('/').pop()}`
@@ -220,39 +286,39 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     e.target.value = '';
   };
 
+  /*
+   * Moves a folder and everything in it. Refuses when the destination is
+   * already in use: two files sharing a path collapse into one tree row, which
+   * silently hid the second file while still saving and zipping both.
+   */
+  const relocateFolder = (fromPath: string, toPath: string): boolean => {
+    if (fromPath === toPath) return false;
+    if (files.some(f => !isWithin(f.name, fromPath) && isWithin(f.name, toPath))) {
+      showToast(`"${toPath.split('/').pop()}" already exists there`);
+      return false;
+    }
+
+    const relocate = (path: string) =>
+      isWithin(path, fromPath) ? `${toPath}${path.substring(fromPath.length)}` : path;
+
+    setFiles(prev => prev.map(f => (isWithin(f.name, fromPath) ? { ...f, name: relocate(f.name) } : f)));
+    setExpandedFolders(prev => new Set(Array.from(prev, relocate)));
+    return true;
+  };
+
   const handleFolderRename = (oldPath: string, newFolderName: string) => {
     if (isReadOnly) return;
+    if (newFolderName.includes('/')) {
+      showToast('Folder names cannot contain "/"');
+      return;
+    }
     const parts = oldPath.split('/');
     parts.pop();
     const newFolderPath = parts.length > 0 ? `${parts.join('/')}/${newFolderName}` : newFolderName;
 
-    setFiles(prev => prev.map(f => {
-      if (f.name.startsWith(oldPath + '/')) {
-        const restOfPath = f.name.substring(oldPath.length);
-        return { ...f, name: `${newFolderPath}${restOfPath}` };
-      }
-      if (f.name === oldPath) {
-        return { ...f, name: newFolderPath };
-      }
-      return f;
-    }));
-
-    setExpandedFolders(prev => {
-      const next = new Set<string>();
-      prev.forEach(path => {
-        if (path.startsWith(oldPath + '/')) {
-          const restOfPath = path.substring(oldPath.length);
-          next.add(`${newFolderPath}${restOfPath}`);
-        } else if (path === oldPath) {
-          next.add(newFolderPath);
-        } else {
-          next.add(path);
-        }
-      });
-      return next;
-    });
-
-    showToast(`Renamed folder to ${newFolderName}`);
+    if (relocateFolder(oldPath, newFolderPath)) {
+      showToast(`Renamed folder to ${newFolderName}`);
+    }
   };
 
   const handleFolderDownload = (folderPath: string) => {
@@ -308,10 +374,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       .filter(f => f.name === folderPath || f.name.startsWith(folderPath + '/'))
       .map(f => f.id);
     const newTabs = openTabIds.filter(id => !deletedFileIds.includes(id));
+    // Large snippets start with one tab; don't strand the user on an empty editor.
+    if (newTabs.length === 0) newTabs.push(newFiles[0].id);
     setOpenTabIds(newTabs);
 
     if (deletedFileIds.includes(activeFileId)) {
-      setActiveFileId(newTabs[newTabs.length - 1] || '');
+      setActiveFileId(newTabs[newTabs.length - 1]);
     }
 
     setExpandedFolders(prev => {
@@ -360,9 +428,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         if (fileToMove) {
           const fileName = fileToMove.name.split('/').pop() || fileToMove.name;
           const newName = targetPath ? `${targetPath}/${fileName}` : fileName;
-          if (fileToMove.name !== newName) {
-            setFiles(files.map(f => f.id === id ? { ...f, name: newName } : f));
+          if (fileToMove.name === newName) return;
+          if (files.some(f => f.id !== id && isWithin(f.name, newName))) {
+            showToast(`"${fileName}" already exists there`);
+            return;
           }
+          setFiles(prev => prev.map(f => f.id === id ? { ...f, name: newName } : f));
         }
       } else if (type === 'folder') {
         if (targetPath === sourcePath || targetPath.startsWith(sourcePath + '/')) {
@@ -370,17 +441,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           return;
         }
         const folderName = sourcePath.split('/').pop();
-        const newFolderPath = targetPath ? `${targetPath}/${folderName}` : folderName;
-        setFiles(files.map(f => {
-          if (f.name.startsWith(sourcePath + '/')) {
-            const restOfPath = f.name.substring(sourcePath.length);
-            return { ...f, name: `${newFolderPath}${restOfPath}` };
-          }
-          if (f.name === sourcePath) {
-            return { ...f, name: newFolderPath };
-          }
-          return f;
-        }));
+        relocateFolder(sourcePath, targetPath ? `${targetPath}/${folderName}` : folderName);
       }
     } catch (err) {
       console.error("Drop error:", err);
@@ -389,10 +450,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
   const handleAddFolder = (parentPath: string = '') => {
     if (isReadOnly) return;
-    const folderName = `new-folder-${Math.floor(Math.random() * 1000)}`;
-    const fullPath = parentPath ? `${parentPath}/${folderName}` : folderName;
-    const newFile = { id: Date.now().toString(), name: `${fullPath}/new-file.txt`, content: '' };
-    setFiles([...files, newFile]);
+    const folderPath = (n: number) => (parentPath ? `${parentPath}/new-folder-${n}` : `new-folder-${n}`);
+    let counter = 1;
+    while (files.some(f => isWithin(f.name, folderPath(counter)))) counter += 1;
+    const fullPath = folderPath(counter);
+    const newFile = { id: createFileId(), name: `${fullPath}/new-file.txt`, content: '' };
+    setFiles(prev => [...prev, newFile]);
     const newExpanded = new Set(expandedFolders);
     if (parentPath) {
       parentPath.split('/').reduce((acc, part) => {
@@ -407,16 +470,20 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   };
 
   const showToast = (msg: string) => {
+    // Each toast gets its full 3s; a stale timer used to cut the next one short.
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(''), 3000);
+    toastTimerRef.current = setTimeout(() => setToastMessage(''), 3000);
   };
 
   const handleAddFile = (parentPath: string = '') => {
     if (isReadOnly) return;
-    const fileName = `file-${files.length + 1}.txt`;
-    const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName;
-    const newFile = { id: Date.now().toString(), name: fullPath, content: '' };
-    setFiles([...files, newFile]);
+    // `files.length + 1` alone repeats a name once an earlier file is deleted.
+    const filePath = (n: number) => (parentPath ? `${parentPath}/file-${n}.txt` : `file-${n}.txt`);
+    let counter = files.length + 1;
+    while (files.some(f => isWithin(f.name, filePath(counter)))) counter += 1;
+    const newFile = { id: createFileId(), name: filePath(counter), content: '' };
+    setFiles(prev => [...prev, newFile]);
     const newExpanded = new Set(expandedFolders);
     if (parentPath) {
       parentPath.split('/').reduce((acc, part) => {
@@ -430,9 +497,42 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     setActiveFileId(newFile.id);
   };
 
-  const handleFileNameChange = (e: React.ChangeEvent<HTMLInputElement>, id: string) => {
+  /*
+   * Renames used to apply on every keystroke, so passing through (or stopping
+   * on) a sibling's name produced two files with one path, and the tree showed
+   * only one of them. The draft is now checked once, when the user commits.
+   */
+  const commitFileRename = (id: string, stem: string) => {
+    setFileRenameDraft(null);
     if (isReadOnly) return;
-    setFiles(files.map(f => f.id === id ? { ...f, name: e.target.value } : f));
+
+    const file = filesById.get(id);
+    if (!file) return;
+
+    const nextStem = stem.trim();
+    const { stem: currentStem, extension } = splitFileName(file.name);
+    if (nextStem === currentStem) return;
+    // Only an already-empty stem (dotfiles like `.env`) may stay empty; clearing
+    // `main.ts` would otherwise rename it to `.ts`.
+    if (!nextStem) {
+      showToast('File name cannot be empty');
+      return;
+    }
+    // A slash would move the file into folders this check never inspected.
+    if (nextStem.includes('/')) {
+      showToast('File names cannot contain "/"');
+      return;
+    }
+
+    const parentPath = file.name.split('/').slice(0, -1).join('/');
+    const fileName = `${nextStem}${extension}`;
+    const nextName = parentPath ? `${parentPath}/${fileName}` : fileName;
+    if (files.some(f => f.id !== id && isWithin(f.name, nextName))) {
+      showToast(`"${fileName}" already exists there`);
+      return;
+    }
+
+    setFiles(prev => prev.map(f => (f.id === id ? { ...f, name: nextName } : f)));
   };
 
   const handleCloseTab = (e: React.MouseEvent, id: string) => {
@@ -454,10 +554,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     setFiles(newFiles);
 
     const newTabs = openTabIds.filter(t => t !== id);
+    // Large snippets start with one tab; don't strand the user on an empty editor.
+    if (newTabs.length === 0) newTabs.push(newFiles[0].id);
     setOpenTabIds(newTabs);
 
     if (activeFileId === id) {
-      setActiveFileId(newTabs[newTabs.length - 1] || '');
+      setActiveFileId(newTabs[newTabs.length - 1]);
     }
   };
 
@@ -477,8 +579,21 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
    * Saves never overlap: a request that arrives while one is in flight sets
    * `resavePending` instead, so the newest state is written once the current
    * write lands. Firing them concurrently risks an older payload landing last.
+   *
+   * `savedFiles` is the file list the server last acknowledged. Updates send
+   * only what differs from it, so an autosave after a one-character edit no
+   * longer re-uploads every file and binary in the snippet.
    */
   const filesRef = React.useRef(files);
+  const lastSeenFilesRef = React.useRef(files);
+  // The raw server list, so any file re-id'd on load counts as changed.
+  const savedFilesRef = React.useRef<CodeFile[] | null>(initialSnippetId ? initialFiles ?? null : null);
+  /*
+   * The site and the Convex functions deploy separately, so the backend may
+   * predate partial saves and reject `fileIds`. After a partial save fails on
+   * the server, this tab falls back to full saves, which every version accepts.
+   */
+  const partialSavesRef = React.useRef(true);
   const snippetIdRef = React.useRef(initialSnippetId);
   const revisionRef = React.useRef(0);
   const savedRevisionRef = React.useRef(0);
@@ -487,6 +602,8 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const runSaveRef = React.useRef<(auto: boolean) => Promise<void>>(async () => {});
 
   const readErrorMessage = async (response: Response) => {
+    // Server faults carry nothing actionable ("Internal Server Error").
+    if (response.status >= 500) return "Couldn't save";
     try {
       const data = await response.json();
       if (data && typeof data.error === 'string') return data.error;
@@ -511,8 +628,10 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
     isSavingRef.current = true;
     const revision = revisionRef.current;
-    const payload = JSON.stringify({ files: filesRef.current });
+    const filesToSave = filesRef.current;
     const existingId = snippetIdRef.current;
+    const savedFiles = existingId && partialSavesRef.current ? savedFilesRef.current : null;
+    const payload = JSON.stringify(buildSaveBody(filesToSave, savedFiles));
     setSaveState({ status: 'saving' });
 
     try {
@@ -529,7 +648,17 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           });
 
       if (!response.ok) {
-        setSaveState({ status: 'error', message: await readErrorMessage(response) });
+        const message = await readErrorMessage(response);
+        if (savedFiles && (response.status === 409 || response.status >= 500)) {
+          // 409: the server no longer has what this tab last saved.
+          // 5xx: possibly a backend without partial-save support.
+          // Either way, resend everything straight away.
+          if (response.status >= 500) partialSavesRef.current = false;
+          savedFilesRef.current = null;
+          resavePendingRef.current = true;
+          return;
+        }
+        setSaveState({ status: 'error', message });
         return;
       }
 
@@ -542,9 +671,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         snippetIdRef.current = data.id;
         setCurrentSnippetId(data.id);
         window.history.replaceState(null, '', `/${data.id}`);
+        // Edits made during the create had no URL to schedule an autosave for.
+        if (revisionRef.current > revision) resavePendingRef.current = true;
       }
 
       savedRevisionRef.current = revision;
+      savedFilesRef.current = filesToSave;
       // More edits landed while the request was in flight.
       setSaveState(revisionRef.current > revision ? { status: 'unsaved' } : { status: 'saved' });
 
@@ -571,26 +703,31 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
   runSaveRef.current = runSave;
 
-  const isFirstRender = React.useRef(true);
+  /*
+   * Keyed on `files` alone. It used to depend on `isReadOnly` too, which broke
+   * both directions of the Edit/View toggle: entering edit mode counted as an
+   * edit (a spurious "Unsaved" and a full re-save of unchanged files), and
+   * switching to view mode within the debounce window cancelled the pending
+   * autosave. Read-only mode can't change `files`, so it needs no gate here.
+   *
+   * Only a new `files` identity is an edit; rescheduling whenever work is
+   * outstanding keeps StrictMode's effect replay from swallowing the save.
+   */
   React.useEffect(() => {
     filesRef.current = files;
 
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
+    if (lastSeenFilesRef.current !== files) {
+      lastSeenFilesRef.current = files;
+      revisionRef.current += 1;
+      setSaveState({ status: 'unsaved' });
     }
 
-    revisionRef.current += 1;
-    if (isReadOnly) return;
-
-    setSaveState({ status: 'unsaved' });
-
     // Unsaved drafts have no URL to PATCH yet; the Save button creates one.
-    if (!snippetIdRef.current) return;
+    if (!snippetIdRef.current || revisionRef.current === savedRevisionRef.current) return;
 
     const timer = setTimeout(() => { void runSaveRef.current(true); }, 1000);
     return () => clearTimeout(timer);
-  }, [files, isReadOnly]);
+  }, [files]);
 
   // Guard against losing work on reload while anything is pending.
   React.useEffect(() => {
@@ -603,6 +740,24 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     window.addEventListener('beforeunload', warnBeforeUnload);
     return () => window.removeEventListener('beforeunload', warnBeforeUnload);
   }, [saveState.status]);
+
+  React.useEffect(() => {
+    if (!isSidebarOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      // A menu inside the drawer handles its own Escape; close one layer at a time.
+      if (event.key === 'Escape' && !event.defaultPrevented) setIsSidebarOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [isSidebarOpen]);
+
+  // Opening a file from the tree (or the phone drawer) could leave its tab
+  // scrolled out of the strip, with nothing showing which file was open.
+  React.useEffect(() => {
+    tabListRef.current
+      ?.querySelector<HTMLElement>('.tab-item.active')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeFileId]);
 
   // Soft wrap is a per-reader preference, so it lives in localStorage rather
   // than in the snippet. Read after mount to keep SSR markup stable.
@@ -810,7 +965,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         } else {
           const isActive = activeFileId === child.id;
 
-          const selectedFile = files.find(file => file.id === child.id);
+          const selectedFile = filesById.get(child.id!);
           const fileOptions: MenuAction[] = [
             {
               label: 'Download file',
@@ -836,6 +991,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                     setOpenTabIds(prev => [...prev, child.id!]);
                   }
                   setActiveFileId(child.id!);
+                  setIsSidebarOpen(false);
                 }}
                 draggable={!isReadOnly}
                 onDragStart={(e) => handleDragStart(e, child.id!, 'file', child.path)}
@@ -856,23 +1012,22 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                   <input
                     type="text"
                     className="file-name-input"
-                    value={(() => {
-                      const fullPath = files.find(f => f.id === child.id)?.name || '';
-                      const baseNameWithExt = fullPath.split('/').pop() || '';
-                      const lastDotIndex = baseNameWithExt.lastIndexOf('.');
-                      return lastDotIndex !== -1 ? baseNameWithExt.substring(0, lastDotIndex) : baseNameWithExt;
-                    })()}
-                    onChange={(e) => {
-                      const fullPath = (files.find(f => f.id === child.id)?.name || '');
-                      const parts = fullPath.split('/');
-                      const baseNameWithExt = parts[parts.length - 1];
-                      const lastDotIndex = baseNameWithExt.lastIndexOf('.');
-                      const extension = lastDotIndex !== -1 ? baseNameWithExt.substring(lastDotIndex) : '';
-                      parts[parts.length - 1] = e.target.value + extension;
-                      handleFileNameChange(
-                        { ...e, target: { ...e.target, value: parts.join('/') } } as unknown as React.ChangeEvent<HTMLInputElement>,
-                        child.id!
-                      );
+                    value={fileRenameDraft && fileRenameDraft.id === child.id
+                      ? fileRenameDraft.stem
+                      : splitFileName(selectedFile?.name || '').stem}
+                    onChange={(e) => setFileRenameDraft({ id: child.id!, stem: e.target.value })}
+                    onBlur={() => {
+                      if (fileRenameDraft && fileRenameDraft.id === child.id) commitFileRename(child.id!, fileRenameDraft.stem);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.currentTarget.blur();
+                      } else if (e.key === 'Escape') {
+                        setFileRenameDraft(null);
+                        // Blur after React drops the draft so onBlur has nothing to commit.
+                        const input = e.currentTarget;
+                        requestAnimationFrame(() => input.blur());
+                      }
                     }}
                     onClick={(e) => e.stopPropagation()}
                     placeholder="filename"
@@ -888,12 +1043,26 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
   return (
     <div className="app-container">
-      {/* Sidebar */}
-      <div className="sidebar">
+      {/* Sidebar: a fixed column on desktop, a slide-in drawer on phones. */}
+      {isSidebarOpen && (
+        <div className="sidebar-backdrop" onClick={() => setIsSidebarOpen(false)} aria-hidden="true" />
+      )}
+      <div id="file-sidebar" className={`sidebar ${isSidebarOpen ? 'is-open' : ''}`}>
         <div className="brand">
           <span className="brand-name">Teter</span>
+          <button
+            type="button"
+            className="btn btn-icon sidebar-close"
+            onClick={() => setIsSidebarOpen(false)}
+            aria-label="Close files"
+            title="Close files"
+          >
+            <X size={18} />
+          </button>
         </div>
 
+        {/* White body inset into the dark chrome, curved at its top corners. */}
+        <div className="sidebar-body">
         <div className="sidebar-header">
           <span className="sidebar-title">Files</span>
           {!isReadOnly && (
@@ -987,14 +1156,31 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
             </button>
           </div>
         )}
+        </div>
       </div>
 
       {/* Main Area */}
       <div className="main-area">
-        <div className="top-bar">
-          <div className="tab-list">
+        {/*
+          Two-tier header: a dark tab strip, then the white toolbar the active
+          tab opens into, so the editor reads as a window beneath its tabs.
+        */}
+        <div className="tab-strip">
+          <button
+            type="button"
+            className="btn btn-icon sidebar-toggle"
+            onClick={() => setIsSidebarOpen(true)}
+            aria-expanded={isSidebarOpen}
+            aria-controls="file-sidebar"
+            aria-label="Show files"
+            title="Show files"
+          >
+            <PanelLeft size={18} />
+          </button>
+
+          <div className="tab-list" ref={tabListRef}>
             {openTabIds.map(tabId => {
-              const file = files.find(f => f.id === tabId);
+              const file = filesById.get(tabId);
               if (!file) return null;
               const fileName = file.name.split('/').pop() || file.name;
               const isActive = file.id === activeFileId;
@@ -1017,6 +1203,20 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
               );
             })}
           </div>
+        </div>
+
+        <div className="window-body">
+        <div className="toolbar">
+          {activeFile && (
+            <div className="toolbar-path" title={activeFile.name}>
+              {activeFile.name.split('/').map((part, index, parts) => (
+                <React.Fragment key={index}>
+                  {index > 0 && <ChevronRight size={12} aria-hidden="true" />}
+                  <span className={index === parts.length - 1 ? 'is-current' : undefined}>{part}</span>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
 
           <div className="header-actions">
             <SaveStatus
@@ -1041,13 +1241,17 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
               title={activeFile?.encoding === 'base64' ? 'Binary files cannot be copied as text' : 'Copy file contents'}
             >
               <Copy size={14} />
-              Copy
+              <span className="btn-label">Copy</span>
             </button>
 
             {activeFile && (
-              <button className="btn btn-outline" onClick={() => handleFileDownload(activeFile)}>
+              <button
+                className="btn btn-outline"
+                onClick={() => handleFileDownload(activeFile)}
+                title="Download file"
+              >
                 <Download size={14} />
-                Download
+                <span className="btn-label">Download</span>
               </button>
             )}
 
@@ -1058,7 +1262,8 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                 title={isReadOnly ? 'Switch to edit mode' : 'Switch to view mode'}
               >
                 {isReadOnly ? <Pencil size={14} /> : <Eye size={14} />}
-                {isReadOnly ? 'Edit' : 'Viewing'}
+                {/* An action, like "Edit"; "Viewing" read as the current state. */}
+                <span className="btn-label">{isReadOnly ? 'Edit' : 'View'}</span>
               </button>
             )}
 
@@ -1106,11 +1311,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
             )}
           </div>
         </div>
+        </div>
       </div>
 
       {/* Toast */}
       {toastMessage && (
-        <div className="toast">
+        <div className="toast" role="status" aria-live="polite">
           <span>{toastMessage}</span>
         </div>
       )}

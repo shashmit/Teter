@@ -20,9 +20,9 @@ export default function SaveStatus({ state, autoSaves, onRetry }: SaveStatusProp
 
   if (state.status === 'error') {
     return (
-      <div className="save-status is-error" role="status">
+      <div className="save-status is-error" role="status" title={state.message}>
         <AlertTriangle size={13} />
-        <span className="save-status-label" title={state.message}>
+        <span className="save-status-label">
           {state.message}
         </span>
         <button type="button" className="save-status-retry" onClick={onRetry}>

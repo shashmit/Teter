@@ -112,6 +112,47 @@ interface RenderToken {
   fontStyle?: number;
 }
 
+function sameTokens(a: RenderToken[], b: RenderToken[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (
+      a[index].content !== b[index].content
+      || a[index].color !== b[index].color
+      || a[index].fontStyle !== b[index].fontStyle
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*
+ * Tokenizing returns fresh arrays for every line on every keystroke, so a
+ * plain re-render rebuilt every span in the file to change one line. Comparing
+ * token values lets React skip all the lines an edit didn't touch.
+ */
+const CodeLine = React.memo(
+  function CodeLine({ number, tokens }: { number: number; tokens: RenderToken[] }) {
+    return (
+      <div className="code-line">
+        <span className="code-line-number">{number}</span>
+        <span className="code-line-content">
+          {tokens.map((token, tokenIndex) => (
+            <span
+              key={tokenIndex}
+              style={{ color: token.color, ...tokenFontStyle(token.fontStyle) }}
+            >
+              {token.content}
+            </span>
+          ))}
+        </span>
+      </div>
+    );
+  },
+  (prev, next) => prev.number === next.number && sameTokens(prev.tokens, next.tokens),
+);
+
 export default function CodeEditor({ value, fileName, readOnly, wrap, onChange }: CodeEditorProps) {
   const [loaded, setLoaded] = useState<{ language: string; highlighter: HighlighterCore } | null>(null);
 
@@ -206,19 +247,7 @@ export default function CodeEditor({ value, fileName, readOnly, wrap, onChange }
         {lines && (
           <pre className="code-overlay" aria-hidden="true">
             {lines.map((tokens, lineIndex) => (
-              <div className="code-line" key={lineIndex}>
-                <span className="code-line-number">{lineIndex + 1}</span>
-                <span className="code-line-content">
-                  {tokens.map((token, tokenIndex) => (
-                    <span
-                      key={tokenIndex}
-                      style={{ color: token.color, ...tokenFontStyle(token.fontStyle) }}
-                    >
-                      {token.content}
-                    </span>
-                  ))}
-                </span>
-              </div>
+              <CodeLine key={lineIndex} number={lineIndex + 1} tokens={tokens} />
             ))}
           </pre>
         )}

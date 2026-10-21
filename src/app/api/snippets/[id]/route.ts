@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ConvexHttpClient } from "convex/browser";
+import { ConvexError } from "convex/values";
 
 interface CodeFilePayload {
     id: string;
@@ -93,20 +94,34 @@ export async function PATCH(
         };
         const { id } = await params;
         const body = await request.json();
-        const { title, files } = body as { title?: string; files?: CodeFilePayload[] };
+        /*
+         * `fileIds`, when present, is the full list of files to keep and `files`
+         * only the ones that changed, so autosave doesn't resend every file.
+         */
+        const { title, files, fileIds } = body as { title?: string; files?: CodeFilePayload[]; fileIds?: string[] };
 
-        if (!files || !Array.isArray(files) || files.length === 0) {
+        if (!Array.isArray(files)) {
+            return NextResponse.json({ error: 'Files are required' }, { status: 400 });
+        }
+        if (fileIds !== undefined && (!Array.isArray(fileIds) || fileIds.some(fileId => typeof fileId !== 'string'))) {
+            return NextResponse.json({ error: 'fileIds must be a list of file ids' }, { status: 400 });
+        }
+        if ((fileIds ?? files).length === 0) {
             return NextResponse.json({ error: 'Files are required' }, { status: 400 });
         }
 
-        const success = await convexClient.mutation("snippets:update", { shortId: id, files, title: title || undefined }) as boolean;
+        const success = await convexClient.mutation("snippets:update", { shortId: id, files, fileIds, title: title || undefined }) as boolean;
 
         if (!success) {
             return NextResponse.json({ error: 'Snippet not found' }, { status: 404 });
         }
 
-        return NextResponse.json({ id, title, files }, { status: 200 });
+        // Echoing `files` back would return the whole upload for nothing.
+        return NextResponse.json({ id, title }, { status: 200 });
     } catch (error) {
+        if (error instanceof ConvexError && (error.data as { code?: string } | undefined)?.code === 'stale') {
+            return NextResponse.json({ error: 'Snippet changed elsewhere', code: 'stale' }, { status: 409 });
+        }
         console.error('Failed to update snippet:', error);
         return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
     }
