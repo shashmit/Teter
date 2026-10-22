@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Hides the floating "N" dev-tools button. It only ever shows in `next dev`;
+  // build errors still surface in the error overlay.
+  devIndicators: false,
 };
 
 export default nextConfig;

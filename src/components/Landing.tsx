@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { RefreshCcw, ArrowRight, Loader2, Code2 } from 'lucide-react';
+import { RefreshCcw, ArrowRight, Loader2 } from 'lucide-react';
 
 /** Same source as layout.tsx's canonical URL, so the preview shows the real address. */
 const SITE_HOST = new URL(process.env.NEXT_PUBLIC_SITE_URL || 'https://teter.vercel.app').host;
@@ -102,7 +102,6 @@ export default function Landing() {
     <div className="landing-container">
       <div className="landing-content animate-fade-in">
         <div className="landing-logo">
-          <div className="brand-mark-large"><Code2 size={32} /></div>
           <h1>Welcome to Teter</h1>
           <p>Create & share code snippets instantly with a custom URL.</p>
         </div>

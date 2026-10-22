@@ -1155,18 +1155,6 @@ body {
   gap: 16px;
 }
 
-.brand-mark-large {
-  width: 64px;
-  height: 64px;
-  border-radius: var(--radius-md);
-  background: var(--primary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  margin-bottom: 8px;
-}
-
 .landing-logo h1 {
   font-size: 32px;
   font-weight: 700;
