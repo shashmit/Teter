@@ -1,6 +1,7 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { ConvexError, v, type Infer } from "convex/values";
+import { claimUpload, releaseUpload } from "./uploads";
 
 const codeFileValidator = v.object({
     id: v.string(),
@@ -9,6 +10,8 @@ const codeFileValidator = v.object({
     encoding: v.optional(v.literal("base64")),
     mimeType: v.optional(v.string()),
     size: v.optional(v.number()),
+    /** Content too large for one document, uploaded in chunks; `content` is ignored. */
+    uploadId: v.optional(v.id("uploads")),
 });
 
 type CodeFileArg = Infer<typeof codeFileValidator>;
@@ -19,16 +22,19 @@ type CodeFileArg = Infer<typeof codeFileValidator>;
  * so matching on message text only ever worked in dev.
  */
 export type SnippetErrorCode = "already_exists" | "stale";
+// Saves can also fail with "upload_missing" (see uploads.ts): a file named an
+// upload that is gone, incomplete or already in use.
 
 function toRow(snippetId: Id<"snippets">, file: CodeFileArg) {
     return {
         snippetId,
         fileId: file.id,
         name: file.name,
-        content: file.content,
+        content: file.uploadId ? "" : file.content,
         encoding: file.encoding,
         mimeType: file.mimeType,
         size: file.size,
+        uploadId: file.uploadId,
     };
 }
 
@@ -64,6 +70,10 @@ export const create = mutation({
             customId: args.shortId,
             snippetId: snippetId,
         });
+
+        for (const file of args.files) {
+            if (file.uploadId) await claimUpload(ctx, file.uploadId, snippetId);
+        }
 
         await Promise.all(
             args.files.map((file) => ctx.db.insert("snippetFiles", toRow(snippetId, file)))
@@ -107,6 +117,7 @@ export const getByShortId = query({
                 encoding: file.encoding,
                 mimeType: file.mimeType,
                 size: file.size,
+                uploadId: file.uploadId,
             }))
             : (snippet.filesJson ? JSON.parse(snippet.filesJson) : []);
             
@@ -149,7 +160,10 @@ export const removeByShortId = mutation({
             const storedFiles = await ctx.db.query("snippetFiles")
                 .withIndex("by_snippetId", q => q.eq("snippetId", snippetId))
                 .collect();
-            await Promise.all(storedFiles.map((file) => ctx.db.delete(file._id)));
+            for (const file of storedFiles) {
+                await ctx.db.delete(file._id);
+                if (file.uploadId) await releaseUpload(ctx, file.uploadId);
+            }
             await ctx.db.delete(snippetId);
             return true;
         }
@@ -194,6 +208,7 @@ export const update = mutation({
             // Duplicate ids could only come from older clients; keep the first.
             if (!keep.has(row.fileId) || stored.has(row.fileId)) {
                 await ctx.db.delete(row._id);
+                if (row.uploadId) await releaseUpload(ctx, row.uploadId);
             } else {
                 stored.set(row.fileId, row);
             }
@@ -224,22 +239,35 @@ export const update = mutation({
 
         for (const file of args.files) {
             const existing = stored.get(file.id);
+            // A file keeping its upload (renamed, say) resends the same id; only
+            // a new upload needs claiming.
+            if (file.uploadId && file.uploadId !== existing?.uploadId) {
+                await claimUpload(ctx, file.uploadId, snippetId);
+            }
+
+            const row = toRow(snippetId, file);
             if (!existing) {
-                await ctx.db.insert("snippetFiles", toRow(snippetId, file));
+                await ctx.db.insert("snippetFiles", row);
             } else if (
-                existing.name !== file.name
-                || existing.content !== file.content
-                || existing.encoding !== file.encoding
-                || existing.mimeType !== file.mimeType
-                || existing.size !== file.size
+                existing.name !== row.name
+                || existing.content !== row.content
+                || existing.encoding !== row.encoding
+                || existing.mimeType !== row.mimeType
+                || existing.size !== row.size
+                || existing.uploadId !== row.uploadId
             ) {
                 await ctx.db.patch(existing._id, {
-                    name: file.name,
-                    content: file.content,
-                    encoding: file.encoding,
-                    mimeType: file.mimeType,
-                    size: file.size,
+                    name: row.name,
+                    content: row.content,
+                    encoding: row.encoding,
+                    mimeType: row.mimeType,
+                    size: row.size,
+                    uploadId: row.uploadId,
                 });
+                // The old content was replaced, or moved back inline.
+                if (existing.uploadId && existing.uploadId !== row.uploadId) {
+                    await releaseUpload(ctx, existing.uploadId);
+                }
             }
         }
 

@@ -4,6 +4,14 @@ All notable changes to Teter are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+- Chunked uploads: files up to 25 MB (previously anything near 1 MB failed to save) are split into chunks, uploaded a few per request, and loaded back on demand when opened or downloaded
+- Upload progress in the save status while large files are sent
+
+---
+
 ## [1.1.0] - 2026-03-29
 
 ### Added

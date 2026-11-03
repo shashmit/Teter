@@ -9,6 +9,8 @@ interface CodeFilePayload {
     encoding?: 'base64';
     mimeType?: string;
     size?: number;
+    /** Set for content uploaded in chunks; `content` is then empty. */
+    uploadId?: string;
 }
 
 interface SnippetResponse {
@@ -119,6 +121,9 @@ export async function PATCH(
         // Echoing `files` back would return the whole upload for nothing.
         return NextResponse.json({ id, title }, { status: 200 });
     } catch (error) {
+        if (error instanceof ConvexError && (error.data as { code?: string } | undefined)?.code === 'upload_missing') {
+            return NextResponse.json({ error: 'An uploaded file expired. Retry to upload it again.', code: 'upload_missing' }, { status: 409 });
+        }
         if (error instanceof ConvexError && (error.data as { code?: string } | undefined)?.code === 'stale') {
             return NextResponse.json({ error: 'Snippet changed elsewhere', code: 'stale' }, { status: 409 });
         }

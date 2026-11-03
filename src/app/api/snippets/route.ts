@@ -10,6 +10,8 @@ interface CodeFilePayload {
     encoding?: 'base64';
     mimeType?: string;
     size?: number;
+    /** Set for content uploaded in chunks; `content` is then empty. */
+    uploadId?: string;
 }
 
 /**
@@ -52,6 +54,9 @@ export async function POST(request: Request) {
         return NextResponse.json({ id: shortId, title }, { status: 201 });
     } catch (error) {
         console.error('Failed to save snippet:', error);
+        if (error instanceof ConvexError && (error.data as { code?: string } | undefined)?.code === 'upload_missing') {
+            return NextResponse.json({ error: 'An uploaded file expired. Retry to upload it again.', code: 'upload_missing' }, { status: 409 });
+        }
         if (error instanceof ConvexError && (error.data as { code?: string } | undefined)?.code === 'already_exists') {
             return NextResponse.json({ error: 'Snippet ID already exists' }, { status: 409 });
         }

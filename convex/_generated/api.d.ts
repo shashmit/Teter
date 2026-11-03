@@ -8,7 +8,10 @@
  * @module
  */
 
+import type * as crons from "../crons.js";
 import type * as snippets from "../snippets.js";
+import type * as uploadLimits from "../uploadLimits.js";
+import type * as uploads from "../uploads.js";
 
 import type {
   ApiFromModules,
@@ -17,7 +20,10 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  crons: typeof crons;
   snippets: typeof snippets;
+  uploadLimits: typeof uploadLimits;
+  uploads: typeof uploads;
 }>;
 
 /**
