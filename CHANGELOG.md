@@ -9,6 +9,7 @@ All notable changes to Teter are documented here.
 ### Added
 - Chunked uploads: files up to 25 MB (previously anything near 1 MB failed to save) are split into chunks, uploaded a few per request, and loaded back on demand when opened or downloaded
 - Upload progress in the save status while large files are sent
+- Excel import: uploading an `.xlsx`, `.xlsm` or `.xls` workbook adds its rows as editable CSV, one file per sheet (a folder for multi-sheet workbooks). Values only; formatting and formulas are dropped. Workbooks that can't be read are uploaded as ordinary files
 
 ---
 

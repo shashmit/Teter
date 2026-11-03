@@ -48,6 +48,7 @@ import {
   uploadContent,
   utf8Length,
 } from '@/lib/chunked-upload';
+import { SpreadsheetConversionError, convertSpreadsheet, isSpreadsheet } from '@/lib/spreadsheet';
 
 export interface CodeFile {
   id: string;
@@ -334,39 +335,78 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     const nextExpanded = new Set<string>();
     expandPath(targetPath, nextExpanded);
     try {
-      const uploadedFiles: CodeFile[] = await Promise.all(
-        selectedFiles.map(async (file, index) => {
-          const rawRelativePath =
-            'webkitRelativePath' in file && (file as File & { webkitRelativePath?: string }).webkitRelativePath
-              ? (file as File & { webkitRelativePath?: string }).webkitRelativePath!
-              : file.name;
-          const sanitizedRelativePath = rawRelativePath
-            .replace(/^\/+/, '')
-            .split('/')
-            .filter(Boolean)
-            .join('/');
-          const desiredPath = targetPath
-            ? `${targetPath}/${sanitizedRelativePath}`
-            : sanitizedRelativePath;
-          const uniquePath = getUniquePath(desiredPath, existingPaths);
-          const parent = uniquePath.split('/').slice(0, -1).join('/');
-          expandPath(parent, nextExpanded);
-          const storedContent = await readFileContent(file);
-          return {
-            id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
-            name: uniquePath,
-            ...storedContent,
-          };
+      // Reads run in parallel. Paths are assigned afterwards, in pick order, since
+      // a workbook's output paths depend on its sheets.
+      const readResults = await Promise.all(
+        selectedFiles.map(async file => {
+          if (isSpreadsheet(file.name)) {
+            try {
+              return { file, sheets: await convertSpreadsheet(file) };
+            } catch (error) {
+              if (!(error instanceof SpreadsheetConversionError)) throw error;
+              // Still upload it, just as the original file.
+              return { file, stored: await readFileContent(file), conversionError: error.message };
+            }
+          }
+          return { file, stored: await readFileContent(file) };
         })
       );
+
+      const uploadedFiles: CodeFile[] = [];
+      const notices: string[] = [];
+      let convertedCount = 0;
+      readResults.forEach((result, index) => {
+        const { file } = result;
+        const rawRelativePath =
+          'webkitRelativePath' in file && (file as File & { webkitRelativePath?: string }).webkitRelativePath
+            ? (file as File & { webkitRelativePath?: string }).webkitRelativePath!
+            : file.name;
+        const sanitizedRelativePath = rawRelativePath
+          .replace(/^\/+/, '')
+          .split('/')
+          .filter(Boolean)
+          .join('/');
+        const desiredPath = targetPath
+          ? `${targetPath}/${sanitizedRelativePath}`
+          : sanitizedRelativePath;
+        const addFile = (path: string, stored: Omit<CodeFile, 'id' | 'name'>) => {
+          const uniquePath = getUniquePath(path, existingPaths);
+          expandPath(uniquePath.split('/').slice(0, -1).join('/'), nextExpanded);
+          uploadedFiles.push({
+            id: `${Date.now()}-${index}-${uploadedFiles.length}-${Math.random().toString(36).slice(2, 8)}`,
+            name: uniquePath,
+            ...stored,
+          });
+        };
+
+        if ('sheets' in result && result.sheets) {
+          convertedCount += 1;
+          const withoutExtension = desiredPath.replace(/\.[^./]+$/, '');
+          const csv = (content: string, size: number) => ({ content, mimeType: 'text/csv', size });
+          if (result.sheets.length === 0) {
+            addFile(`${withoutExtension}.csv`, csv('', 0));
+          } else if (result.sheets.length === 1) {
+            // A folder holding one file would only add a click.
+            addFile(`${withoutExtension}.csv`, csv(result.sheets[0].content, result.sheets[0].size));
+          } else {
+            const folder = getUniquePath(withoutExtension, existingPaths);
+            result.sheets.forEach(sheet => addFile(`${folder}/${sheet.name}.csv`, csv(sheet.content, sheet.size)));
+          }
+        } else {
+          if (result.conversionError) notices.push(`${result.conversionError}; uploaded as a file`);
+          addFile(desiredPath, result.stored);
+        }
+      });
+
       setFiles(prev => [...prev, ...uploadedFiles]);
       setExpandedFolders(prev => new Set([...prev, ...nextExpanded]));
-      const uploadedLabel = uploadedFiles.length === 1
+      const uploadedLabel = selectedFiles.length === 1 && uploadedFiles.length === 1
         ? `Uploaded ${uploadedFiles[0].name.split('/').pop()}`
-        : `Uploaded ${uploadedFiles.length} files`;
-      showToast(skipped
-        ? `${uploadedLabel}; skipped ${skipped} over ${formatFileSize(MAX_FILE_BYTES)}`
-        : uploadedLabel);
+        : selectedFiles.length === 1 && convertedCount === 1
+          ? `Uploaded ${selectedFiles[0].name} as ${uploadedFiles.length} CSV files`
+          : `Uploaded ${uploadedFiles.length} files`;
+      if (skipped) notices.push(`skipped ${skipped} over ${formatFileSize(MAX_FILE_BYTES)}`);
+      showToast([uploadedLabel, ...notices].join('; '));
     } catch (err) {
       console.error('Upload error:', err);
       showToast('Failed to upload files');
