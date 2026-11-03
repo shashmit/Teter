@@ -39,6 +39,15 @@ import {
   readFileContent,
   type FileEncoding,
 } from '@/lib/file-content';
+import {
+  INLINE_MAX_CHARS,
+  MAX_FILE_BYTES,
+  SAVE_INLINE_BUDGET_BYTES,
+  UploadError,
+  downloadContent,
+  uploadContent,
+  utf8Length,
+} from '@/lib/chunked-upload';
 
 export interface CodeFile {
   id: string;
@@ -47,6 +56,12 @@ export interface CodeFile {
   encoding?: FileEncoding;
   mimeType?: string;
   size?: number;
+  /**
+   * Set when the content lives in a chunked upload on the server. `content` is
+   * then empty and is fetched on demand (see `ensureContent`); editing the file
+   * clears this, making the edited text inline content again.
+   */
+  uploadId?: string;
 }
 
 interface EditorProps {
@@ -96,6 +111,36 @@ function buildSaveBody(files: CodeFile[], savedFiles: CodeFile[] | null) {
     files: files.filter(file => !unchanged.has(file)),
     fileIds: files.map(file => file.id),
   };
+}
+
+/**
+ * Picks the files a save must send as chunked uploads: anything over the
+ * inline limit, then the largest of the rest until the request body fits.
+ * Many medium files could otherwise add up past Vercel's request limit.
+ */
+function pickFilesToUpload(files: CodeFile[]): Set<CodeFile> {
+  const toUpload = new Set<CodeFile>();
+  const inline: { file: CodeFile; bytes: number }[] = [];
+  let inlineBytes = 0;
+
+  for (const file of files) {
+    if (file.uploadId) continue;
+    if (file.content.length > INLINE_MAX_CHARS) {
+      toUpload.add(file);
+    } else {
+      const bytes = utf8Length(file.content);
+      inline.push({ file, bytes });
+      inlineBytes += bytes;
+    }
+  }
+
+  inline.sort((a, b) => b.bytes - a.bytes);
+  for (const { file, bytes } of inline) {
+    if (inlineBytes <= SAVE_INLINE_BUDGET_BYTES) break;
+    toUpload.add(file);
+    inlineBytes -= bytes;
+  }
+  return toUpload;
 }
 
 function buildTree(files: CodeFile[]) {
@@ -170,9 +215,63 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const tabListRef = React.useRef<HTMLDivElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
+  /*
+   * Content of chunk-uploaded files, by upload id, once fetched. It is kept out
+   * of `files` on purpose: filling a file object in would change its identity,
+   * which the save pipeline reads as an edit and would re-save.
+   */
+  const [loadedContent, setLoadedContent] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const [failedUploadIds, setFailedUploadIds] = useState<ReadonlySet<string>>(() => new Set());
+  const contentRequestsRef = React.useRef(new Map<string, Promise<string>>());
+
+  /** The file with its full content, fetching chunked content if needed. */
+  const ensureContent = React.useCallback(async (file: CodeFile): Promise<CodeFile> => {
+    const { uploadId } = file;
+    if (!uploadId) return file;
+
+    let pending = contentRequestsRef.current.get(uploadId);
+    if (!pending) {
+      pending = downloadContent(uploadId);
+      contentRequestsRef.current.set(uploadId, pending);
+      // A retry shows "Loading" again rather than the last failure.
+      setFailedUploadIds(prev => {
+        if (!prev.has(uploadId)) return prev;
+        const next = new Set(prev);
+        next.delete(uploadId);
+        return next;
+      });
+      pending.then(
+        content => setLoadedContent(prev => new Map(prev).set(uploadId, content)),
+        () => {
+          // Forget the failure so the next attempt asks again.
+          contentRequestsRef.current.delete(uploadId);
+          setFailedUploadIds(prev => new Set(prev).add(uploadId));
+        },
+      );
+    }
+    return { ...file, content: await pending };
+  }, []);
+
   // The tree and tabs look files up by id per row; a scan each time is O(n²).
   const filesById = useMemo(() => new Map(files.map(file => [file.id, file])), [files]);
-  const activeFile = filesById.get(activeFileId);
+  const activeEntry = filesById.get(activeFileId);
+  /** Chunked content that is still being fetched (or failed to be). */
+  const isActiveFileLoading = Boolean(activeEntry?.uploadId && !loadedContent.has(activeEntry.uploadId));
+  const activeFile = useMemo(
+    () => activeEntry?.uploadId && loadedContent.has(activeEntry.uploadId)
+      ? { ...activeEntry, content: loadedContent.get(activeEntry.uploadId)! }
+      : activeEntry,
+    [activeEntry, loadedContent],
+  );
+  const activeLoadFailed = Boolean(activeEntry?.uploadId && failedUploadIds.has(activeEntry.uploadId));
+
+  // Text is fetched when its file is opened. Binary files only need their
+  // content to download, so they wait for that.
+  React.useEffect(() => {
+    if (!activeEntry?.uploadId || activeEntry.encoding === 'base64') return;
+    if (loadedContent.has(activeEntry.uploadId) || failedUploadIds.has(activeEntry.uploadId)) return;
+    ensureContent(activeEntry).catch(error => console.error('Load error:', error));
+  }, [activeEntry, loadedContent, failedUploadIds, ensureContent]);
   const tree = useMemo(() => buildTree(files), [files]);
   const toastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -222,8 +321,14 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
   const uploadFilesAtPath = async (uploadList: FileList | File[], targetPath: string) => {
     if (isReadOnly) return;
-    const selectedFiles = Array.from(uploadList);
-    if (!selectedFiles.length) return;
+    const pickedFiles = Array.from(uploadList);
+    if (!pickedFiles.length) return;
+    const selectedFiles = pickedFiles.filter(file => file.size <= MAX_FILE_BYTES);
+    const skipped = pickedFiles.length - selectedFiles.length;
+    if (!selectedFiles.length) {
+      showToast(`Files over ${formatFileSize(MAX_FILE_BYTES)} can't be uploaded`);
+      return;
+    }
     const existingPaths = new Set(files.map(file => file.name));
     // Only the additions: reads are async, and the user may toggle folders meanwhile.
     const nextExpanded = new Set<string>();
@@ -256,11 +361,12 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
       );
       setFiles(prev => [...prev, ...uploadedFiles]);
       setExpandedFolders(prev => new Set([...prev, ...nextExpanded]));
-      showToast(
-        uploadedFiles.length === 1
-          ? `Uploaded ${uploadedFiles[0].name.split('/').pop()}`
-          : `Uploaded ${uploadedFiles.length} files`
-      );
+      const uploadedLabel = uploadedFiles.length === 1
+        ? `Uploaded ${uploadedFiles[0].name.split('/').pop()}`
+        : `Uploaded ${uploadedFiles.length} files`;
+      showToast(skipped
+        ? `${uploadedLabel}; skipped ${skipped} over ${formatFileSize(MAX_FILE_BYTES)}`
+        : uploadedLabel);
     } catch (err) {
       console.error('Upload error:', err);
       showToast('Failed to upload files');
@@ -321,23 +427,24 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
   };
 
-  const handleFolderDownload = (folderPath: string) => {
+  const handleFolderDownload = async (folderPath: string) => {
     const prefix = folderPath + '/';
-    const entries = files
-      .filter(f => f.name === folderPath || f.name.startsWith(prefix))
-      .map(f => ({
-        path: f.name.startsWith(prefix) ? f.name.slice(prefix.length) : f.name,
-        content: getFileBytes(f),
-      }))
-      .filter(e => e.path.length > 0);
+    const folderFiles = files
+      .filter(f => f.name.startsWith(prefix) && f.name.length > prefix.length);
 
-    if (entries.length === 0) {
+    if (folderFiles.length === 0) {
       showToast('Folder is empty');
       return;
     }
 
     const folderName = folderPath.split('/').pop() || 'folder';
     try {
+      if (folderFiles.some(f => f.uploadId)) showToast(`Preparing ${folderName}.zip…`);
+      const loaded = await Promise.all(folderFiles.map(ensureContent));
+      const entries = loaded.map(f => ({
+        path: f.name.slice(prefix.length),
+        content: getFileBytes(f),
+      }));
       const blob = createZip(entries);
       downloadBlob(blob, `${folderName}.zip`);
       showToast(`Downloaded ${folderName}.zip`);
@@ -347,10 +454,11 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     }
   };
 
-  const handleFileDownload = (file: CodeFile) => {
+  const handleFileDownload = async (file: CodeFile) => {
     try {
       const fileName = file.name.split('/').pop() || file.name;
-      downloadBlob(createFileBlob(file), fileName);
+      if (file.uploadId && !loadedContent.has(file.uploadId)) showToast(`Preparing ${fileName}…`);
+      downloadBlob(createFileBlob(await ensureContent(file)), fileName);
       showToast(`Downloaded ${fileName}`);
     } catch (error) {
       console.error('File download error:', error);
@@ -565,7 +673,8 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
   const handleContentChange = (nextContent: string) => {
     if (isReadOnly) return;
-    setFiles(prev => prev.map(f => f.id === activeFileId ? { ...f, content: nextContent } : f));
+    // Edited text is inline again; the next save decides whether to re-upload it.
+    setFiles(prev => prev.map(f => f.id === activeFileId ? { ...f, content: nextContent, uploadId: undefined } : f));
   };
 
   /*
@@ -600,18 +709,53 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
   const isSavingRef = React.useRef(false);
   const resavePendingRef = React.useRef(false);
   const runSaveRef = React.useRef<(auto: boolean) => Promise<void>>(async () => {});
+  /*
+   * Uploads this tab made, by file id, with the content each holds. A later
+   * save of the same content (after a rename, or a full resave) reuses the
+   * upload instead of sending megabytes again.
+   */
+  const uploadsRef = React.useRef(new Map<string, { content: string; uploadId: string }>());
 
-  const readErrorMessage = async (response: Response) => {
+  const readError = async (response: Response): Promise<{ message: string; code?: string }> => {
     // Server faults carry nothing actionable ("Internal Server Error").
-    if (response.status >= 500) return "Couldn't save";
+    if (response.status >= 500) return { message: "Couldn't save" };
     try {
       const data = await response.json();
-      if (data && typeof data.error === 'string') return data.error;
+      if (data && typeof data.error === 'string') {
+        return { message: data.error, code: typeof data.code === 'string' ? data.code : undefined };
+      }
     } catch {
       // Fall through to the status-based message.
     }
-    if (response.status === 413) return 'Snippet is too large to save';
-    return `Save failed (${response.status})`;
+    if (response.status === 413) return { message: 'Snippet is too large to save' };
+    return { message: `Save failed (${response.status})` };
+  };
+
+  /**
+   * Turns files into what the save request carries: content that's too large
+   * is uploaded in chunks first and replaced by its upload id.
+   */
+  const prepareFilesForSave = async (filesToSend: CodeFile[]): Promise<CodeFile[]> => {
+    const uploads = uploadsRef.current;
+    const uploading = pickFilesToUpload(filesToSend);
+    const toUpload = [...uploading].filter(file => uploads.get(file.id)?.content !== file.content);
+    const totalChars = toUpload.reduce((sum, file) => sum + file.content.length, 0);
+    let sentChars = 0;
+
+    for (const file of toUpload) {
+      const uploadId = await uploadContent(file.content, sent => {
+        setSaveState({ status: 'saving', progress: (sentChars + sent) / totalChars });
+      });
+      sentChars += file.content.length;
+      uploads.set(file.id, { content: file.content, uploadId });
+    }
+
+    return filesToSend.map(file => {
+      // Content loaded from the server isn't in `file`; the id is enough.
+      if (file.uploadId) return { ...file, content: '' };
+      if (!uploading.has(file)) return file;
+      return { ...file, content: '', uploadId: uploads.get(file.id)!.uploadId };
+    });
   };
 
   /*
@@ -631,10 +775,11 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
     const filesToSave = filesRef.current;
     const existingId = snippetIdRef.current;
     const savedFiles = existingId && partialSavesRef.current ? savedFilesRef.current : null;
-    const payload = JSON.stringify(buildSaveBody(filesToSave, savedFiles));
     setSaveState({ status: 'saving' });
 
     try {
+      const body = buildSaveBody(filesToSave, savedFiles);
+      const payload = JSON.stringify({ ...body, files: await prepareFilesForSave(body.files) });
       const response = existingId
         ? await fetch(`/api/snippets/${existingId}`, {
             method: 'PATCH',
@@ -648,7 +793,13 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
           });
 
       if (!response.ok) {
-        const message = await readErrorMessage(response);
+        const { message, code } = await readError(response);
+        if (code === 'upload_missing') {
+          // Upload again on retry rather than resending a dead id.
+          uploadsRef.current.clear();
+          setSaveState({ status: 'error', message });
+          return;
+        }
         if (savedFiles && (response.status === 409 || response.status >= 500)) {
           // 409: the server no longer has what this tab last saved.
           // 5xx: possibly a backend without partial-save support.
@@ -677,6 +828,11 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
 
       savedRevisionRef.current = revision;
       savedFilesRef.current = filesToSave;
+      // Drop uploads of files since deleted or edited; they hold large strings.
+      const current = new Map(filesToSave.map(file => [file.id, file.content]));
+      for (const [fileId, upload] of uploadsRef.current) {
+        if (current.get(fileId) !== upload.content) uploadsRef.current.delete(fileId);
+      }
       // More edits landed while the request was in flight.
       setSaveState(revisionRef.current > revision ? { status: 'unsaved' } : { status: 'saved' });
 
@@ -690,7 +846,9 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
         status: 'error',
         message: typeof navigator !== 'undefined' && !navigator.onLine
           ? 'Offline — changes are kept in this tab'
-          : 'Could not reach the server',
+          : error instanceof UploadError
+            ? error.message
+            : 'Could not reach the server',
       });
     } finally {
       isSavingRef.current = false;
@@ -1237,7 +1395,7 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
             <button
               className="btn btn-outline"
               onClick={handleCopyCode}
-              disabled={!activeFile || activeFile.encoding === 'base64'}
+              disabled={!activeFile || activeFile.encoding === 'base64' || isActiveFileLoading}
               title={activeFile?.encoding === 'base64' ? 'Binary files cannot be copied as text' : 'Copy file contents'}
             >
               <Copy size={14} />
@@ -1293,6 +1451,24 @@ export default function Editor({ initialFiles, snippetId: initialSnippetId, isRe
                   <Download size={14} />
                   Download file
                 </button>
+              </div>
+            ) : activeFile && isActiveFileLoading ? (
+              <div className="hero-message">
+                <FileText size={48} strokeWidth={1} />
+                <p>
+                  {activeLoadFailed
+                    ? `Couldn't load ${activeFile.name.split('/').pop()}`
+                    : `Loading ${activeFile.name.split('/').pop()}…`}
+                </p>
+                {activeFile.size !== undefined && <span>{formatFileSize(activeFile.size)}</span>}
+                {activeLoadFailed && (
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => { ensureContent(activeFile).catch(error => console.error('Load error:', error)); }}
+                  >
+                    Try again
+                  </button>
+                )}
               </div>
             ) : activeFile ? (
               <CodeEditor

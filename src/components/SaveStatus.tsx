@@ -4,7 +4,9 @@ import React from 'react';
 import { AlertTriangle, Check, Cloud, Loader2, RotateCcw } from 'lucide-react';
 
 export type SaveState =
-  | { status: 'idle' | 'unsaved' | 'saving' | 'saved' }
+  | { status: 'idle' | 'unsaved' | 'saved' }
+  /** `progress` (0–1) is set while large files upload ahead of the save. */
+  | { status: 'saving'; progress?: number }
   | { status: 'error'; message: string };
 
 interface SaveStatusProps {
@@ -37,7 +39,9 @@ export default function SaveStatus({ state, autoSaves, onRetry }: SaveStatusProp
     return (
       <div className="save-status is-saving" role="status">
         <Loader2 size={13} className="animate-spin" />
-        <span className="save-status-label">Saving…</span>
+        <span className="save-status-label">
+          {state.progress === undefined ? 'Saving…' : `Uploading ${Math.floor(state.progress * 100)}%`}
+        </span>
       </div>
     );
   }
