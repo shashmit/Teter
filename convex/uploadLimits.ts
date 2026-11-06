@@ -16,11 +16,14 @@ export const CHUNK_CHARS = 256 * 1024;
 /** Most UTF-8 bytes of chunk data moved by one request, under Vercel's 4.5 MB. */
 export const BATCH_BYTES = 3 * 1024 * 1024;
 
-/** Server-side ceiling on one upload: 256 chunks is 64 Mi characters. */
-export const MAX_UPLOAD_CHUNKS = 256;
+/**
+ * Server-side ceiling on one upload: 544 chunks is 136 Mi characters, room for
+ * a MAX_FILE_BYTES binary file once base64 makes it ~133.3 Mi characters.
+ */
+export const MAX_UPLOAD_CHUNKS = 544;
 
-/** Largest file the editor accepts. Base64 makes this ~33.3 Mi characters. */
-export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+/** Largest file the editor accepts. Base64 makes this ~133.3 Mi characters. */
+export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 /** UTF-8 length of a string without allocating an encoded copy. */
 export function utf8Length(value: string): number {
